@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/processed/"
@@ -5,8 +7,8 @@ DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/processed/"
 # Edges: 35,649,195
 # Entities: 5,864,272
 
-import numpy as np
 import torch
+from tqdm import tqdm
 
 
 def load_data(path):
@@ -81,14 +83,35 @@ def main():
     pos_dataset = PositiveDataset(DATA_DIR)
     neg_dataset = NegativeDataset(num_edges=63, num_entities=5_864_272, num_datapoints=len(pos_dataset))
 
-    pos_dataloader = torch.utils.data.DataLoader(dataset=pos_dataset, batch_size=32, shuffle=True)
-    neg_dataloader = torch.utils.data.DataLoader(dataset=neg_dataset, batch_size=32, shuffle=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_workers = min(6, os.cpu_count() or 1)
+    pin_memory = device.type == "cuda"
 
-    model = Model(len(pos_dataset.entities_map), len(pos_dataset.relations_map))
+    pos_dataloader = torch.utils.data.DataLoader(
+        dataset=pos_dataset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+    neg_dataloader = torch.utils.data.DataLoader(
+        dataset=neg_dataset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+
+    model = Model(len(pos_dataset.entities_map), len(pos_dataset.relations_map)).to(device)
+    model.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    for pos_edges, neg_edges in zip(pos_dataloader, neg_dataloader):
+    for pos_edges, neg_edges in (pbar := tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader))):
+        pos_edges = pos_edges.to(device, non_blocking=pin_memory)
+        neg_edges = neg_edges.to(device, non_blocking=pin_memory)
         pos_scores = model(pos_edges)
         neg_scores = model(neg_edges)
 
@@ -98,7 +121,7 @@ def main():
         loss.backward()
         optimizer.step()
 
-        print(f"LOSS: {loss.detach()}")
+        pbar.set_postfix(loss=f"{loss.item():.4f}")
 
 
 if __name__ == "__main__":
