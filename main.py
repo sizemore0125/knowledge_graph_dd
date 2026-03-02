@@ -29,22 +29,26 @@ class KGDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         edge = torch.Tensor(np.array(self.edges[idx])).to(torch.long)
-        return edge, torch.as_tensor(1).to(torch.float32)
+        y = torch.as_tensor(1).to(torch.float32)
+        return edge, y
 
 
 class NegativeDataset(torch.utils.data.Dataset):
-    def __init__(self, num_edges, num_entities):
+    def __init__(self, num_edges, num_entities, num_datapoints: int = 65_000_000):
         self.num_edges = num_edges
         self.num_entites = num_entities
 
+        self.num_datapoints = num_datapoints
+
     def __len__(self):
-        return 65_000_000
+        return self.num_datapoints
 
     def __getitem__(self, idx):
-        node1 = torch.randint(0, self.num_entites, (1,))
-        edge = torch.randint(0, self.num_edges, (1,))
-        node2 = torch.randint(0, self.num_entites, (1,))
-        return torch.Tensor([node1, edge, node2]).to(torch.long), torch.as_tensor(0).to(torch.float32)
+        entity1 = torch.randint(0, self.num_entites, (1,))
+        relation = torch.randint(0, self.num_edges, (1,))
+        entity2 = torch.randint(0, self.num_entites, (1,))
+        y = torch.as_tensor(0).to(torch.float32)
+        return torch.Tensor([entity1, relation, entity2]).to(torch.long), y
 
 
 class Model(torch.nn.Module):
