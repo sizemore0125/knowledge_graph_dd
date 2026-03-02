@@ -81,7 +81,11 @@ class Model(torch.nn.Module):
 
 def main():
     pos_dataset = PositiveDataset(DATA_DIR)
-    neg_dataset = NegativeDataset(num_edges=63, num_entities=5_864_272, num_datapoints=len(pos_dataset))
+    neg_dataset = NegativeDataset(
+        num_edges=len(pos_dataset.relations_map),
+        num_entities=len(pos_dataset.entities_map),
+        num_datapoints=len(pos_dataset),
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_workers = min(6, os.cpu_count() or 1)
