@@ -15,7 +15,7 @@ def load_data(path):
     return [s.strip().replace("biolink:", "") for s in data]
 
 
-class KGDataset(torch.utils.data.Dataset):
+class PositiveDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir):
         edges_path = data_dir + "edges.bin"
 
@@ -29,8 +29,8 @@ class KGDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         edge = torch.Tensor(np.array(self.edges[idx])).to(torch.long)
-        y = torch.as_tensor(1).to(torch.float32)
-        return edge, y
+        # y = torch.as_tensor(1).to(torch.float32)
+        return edge
 
 
 class NegativeDataset(torch.utils.data.Dataset):
@@ -47,8 +47,8 @@ class NegativeDataset(torch.utils.data.Dataset):
         entity1 = torch.randint(0, self.num_entites, (1,))
         relation = torch.randint(0, self.num_edges, (1,))
         entity2 = torch.randint(0, self.num_entites, (1,))
-        y = torch.as_tensor(0).to(torch.float32)
-        return torch.Tensor([entity1, relation, entity2]).to(torch.long), y
+        # y = torch.as_tensor(0).to(torch.float32)
+        return torch.Tensor([entity1, relation, entity2]).to(torch.long)
 
 
 class Model(torch.nn.Module):
@@ -78,19 +78,21 @@ class Model(torch.nn.Module):
 
 
 def main():
-    pos_dataset = KGDataset(DATA_DIR)
-    neg_dataset = NegativeDataset(num_edges=63, num_entities=5_864_272)
-    dataset = torch.utils.data.ConcatDataset([pos_dataset, neg_dataset])
+    pos_dataset = PositiveDataset(DATA_DIR)
+    neg_dataset = NegativeDataset(num_edges=63, num_entities=5_864_272, num_datapoints=len(pos_dataset))
 
-    dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=32, shuffle=True)
+    pos_dataloader = torch.utils.data.DataLoader(dataset=pos_dataset, batch_size=32, shuffle=True)
+    neg_dataloader = torch.utils.data.DataLoader(dataset=neg_dataset, batch_size=32, shuffle=True)
 
     model = Model(len(pos_dataset.entities_map), len(pos_dataset.relations_map))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    for edge, y in dataloader:
-        y_pred = model(edge)
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(y_pred, y[:, None])
+    for pos_edges, neg_edges in zip(pos_dataloader, neg_dataloader):
+        pos_scores = model(pos_edges)
+        neg_scores = model(neg_edges)
+
+        loss = torch.nn.functional.softplus(-pos_scores).mean() + torch.nn.functional.softplus(neg_scores).mean()
 
         optimizer.zero_grad()
         loss.backward()
