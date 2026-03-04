@@ -1,20 +1,33 @@
 import os
 
+import igraph as ig
 import numpy as np
-
-DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/processed/"
-# Relations: 63
-# Edges: 35,649,195
-# Entities: 5,864,272
 
 import torch
 from tqdm import tqdm
+
+DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/processed/"
 
 
 def load_data(path):
     with open(path, "r") as f:
         data = f.readlines()
     return [s.strip().replace("biolink:", "") for s in data]
+
+
+def load_hierarchy(path, num_nodes):
+    edges = []
+
+    with open(path, "r") as f:
+        for line in f:
+            child_str, parent_str = line.rstrip("\n").split("\t")
+            child_id = int(child_str)
+            parent_id = int(parent_str)
+
+            if child_id < num_nodes and parent_id < num_nodes:
+                edges.append((child_id, parent_id))
+
+    return edges
 
 
 class PositiveDataset(torch.utils.data.Dataset):
@@ -36,9 +49,9 @@ class PositiveDataset(torch.utils.data.Dataset):
 
 
 class NegativeDataset(torch.utils.data.Dataset):
-    def __init__(self, num_edges, num_entities, num_datapoints: int = 65_000_000):
-        self.num_edges = num_edges
-        self.num_entites = num_entities
+    def __init__(self, num_relations, num_entities, num_datapoints):
+        self.num_relations = num_relations
+        self.num_entities = num_entities
 
         self.num_datapoints = num_datapoints
 
@@ -46,27 +59,83 @@ class NegativeDataset(torch.utils.data.Dataset):
         return self.num_datapoints
 
     def __getitem__(self, idx):
-        entity1 = torch.randint(0, self.num_entites, (1,))
-        relation = torch.randint(0, self.num_edges, (1,))
-        entity2 = torch.randint(0, self.num_entites, (1,))
+        entity1 = torch.randint(0, self.num_entities, (1,))
+        relation = torch.randint(0, self.num_relations, (1,))
+        entity2 = torch.randint(0, self.num_entities, (1,))
         # y = torch.as_tensor(0).to(torch.float32)
         return torch.Tensor([entity1, relation, entity2]).to(torch.long)
 
 
-class Model(torch.nn.Module):
-    def __init__(self, n_entities, n_relations, emb_dim=8):
+class HierarchicalEmbedding(torch.nn.Module):
+    def __init__(self, num_nodes, dim, edges):
         super().__init__()
-        self.entity_codebook = torch.nn.Embedding(n_entities, emb_dim)
-        self.relation_codebook = torch.nn.Embedding(n_relations, emb_dim)
+        self.num_nodes = num_nodes
+        self.residual = torch.nn.Embedding(num_nodes, dim)
+        graph = ig.Graph(n=num_nodes, edges=edges, directed=True)
+        self.ancestor_ids_by_node = [graph.subcomponent(node_id, mode="OUT") for node_id in range(num_nodes)]
+
+    def forward(self, node_ids):
+        flat_node_ids = node_ids.reshape(-1)
+        unique_node_ids, inverse = torch.unique(flat_node_ids, sorted=False, return_inverse=True)
+        unique_node_list = unique_node_ids.detach().cpu().tolist()
+
+        flat_ancestor_ids = []
+        owner_ids = []
+
+        for batch_idx, node_id in enumerate(unique_node_list):
+            ancestors = self.ancestor_ids_by_node[node_id]
+            flat_ancestor_ids.extend(ancestors)
+            owner_ids.extend([batch_idx] * len(ancestors))
+
+        ancestor_index_tensor = torch.tensor(
+            flat_ancestor_ids,
+            device=flat_node_ids.device,
+            dtype=torch.long,
+        )
+
+        owner_index_tensor = torch.tensor(
+            owner_ids,
+            device=flat_node_ids.device,
+            dtype=torch.long,
+        )
+
+        ancestor_embeddings = self.residual(ancestor_index_tensor)
+        unique_embeddings = torch.zeros(
+            (unique_node_ids.shape[0], self.residual.embedding_dim),
+            device=flat_node_ids.device,
+            dtype=ancestor_embeddings.dtype,
+        )
+        unique_embeddings.index_add_(0, owner_index_tensor, ancestor_embeddings)
+
+        return unique_embeddings[inverse].reshape(*node_ids.shape, self.residual.embedding_dim)
+
+
+class Model(torch.nn.Module):
+    def __init__(
+        self,
+        n_entities,
+        n_relations,
+        entity_hierarchy_edges,
+        relation_hierarchy_edges,
+        emb_dim=8,
+    ):
+        super().__init__()
+        self.entity_codebook = HierarchicalEmbedding(n_entities, emb_dim, entity_hierarchy_edges)
+        self.relation_codebook = HierarchicalEmbedding(n_relations, emb_dim, relation_hierarchy_edges)
         self.emb_dim = emb_dim
 
         self.input_layer = torch.nn.Linear(emb_dim * 3, 512)
         self.output_layer = torch.nn.Linear(512, 1)
 
     def forward(self, edge):
-        entity1 = self.entity_codebook(edge[:, 0])
+
+        entity_ids = torch.cat([edge[:, 0], edge[:, 2]], dim=0)
+        entity_embeddings = self.entity_codebook(entity_ids)
+        split_idx = edge.shape[0]
+
+        entity1 = entity_embeddings[:split_idx]
         relation = self.relation_codebook(edge[:, 1])
-        entity2 = self.entity_codebook(edge[:, 2])
+        entity2 = entity_embeddings[split_idx:]
 
         in_vector = torch.hstack([entity1, relation, entity2])
 
@@ -74,15 +143,13 @@ class Model(torch.nn.Module):
         a = torch.nn.functional.elu(z)
         y_pred = self.output_layer(a)
 
-        assert y_pred.dtype == torch.float32
-
         return y_pred
 
 
 def main():
     pos_dataset = PositiveDataset(DATA_DIR)
     neg_dataset = NegativeDataset(
-        num_edges=len(pos_dataset.relations_map),
+        num_relations=len(pos_dataset.relations_map),
         num_entities=len(pos_dataset.entities_map),
         num_datapoints=len(pos_dataset),
     )
@@ -108,12 +175,28 @@ def main():
         persistent_workers=num_workers > 0,
     )
 
-    model = Model(len(pos_dataset.entities_map), len(pos_dataset.relations_map)).to(device)
+    entity_hierarchy_edges = load_hierarchy(
+        DATA_DIR + "subclass_edge_list.txt",
+        len(pos_dataset.entities_map),
+    )
+    relation_hierarchy_edges = load_hierarchy(
+        DATA_DIR + "relation_hierarchy_edge_list.txt",
+        len(pos_dataset.relations_map),
+    )
+
+    model = Model(
+        n_entities=len(pos_dataset.entities_map),
+        n_relations=len(pos_dataset.relations_map),
+        entity_hierarchy_edges=entity_hierarchy_edges,
+        relation_hierarchy_edges=relation_hierarchy_edges,
+    ).to(device)
     model.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    for pos_edges, neg_edges in (pbar := tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader))):
+    for step_idx, (pos_edges, neg_edges) in enumerate(
+        pbar := tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader), miniters=10)
+    ):
         pos_edges = pos_edges.to(device, non_blocking=pin_memory)
         neg_edges = neg_edges.to(device, non_blocking=pin_memory)
         pos_scores = model(pos_edges)
@@ -125,7 +208,8 @@ def main():
         loss.backward()
         optimizer.step()
 
-        pbar.set_postfix(loss=f"{loss.item():.4f}")
+        if step_idx % 10 == 0:
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
 
 if __name__ == "__main__":
