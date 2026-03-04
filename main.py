@@ -84,7 +84,28 @@ class HierarchicalEmbedding(torch.nn.Module):
         self.num_nodes = num_nodes
         self.residual = torch.nn.Embedding(num_nodes, dim)
         graph = ig.Graph(n=num_nodes, edges=edges, directed=True)
-        self.ancestor_ids_by_node = [graph.subcomponent(node_id, mode="OUT") for node_id in range(num_nodes)]
+
+        if not graph.is_dag():
+            raise ValueError("HierarchicalEmbedding requires a DAG (child -> parent).")
+
+        # Precompute coefficients for:
+        # E(v) = Delta(v) + mean(E(parent(v)))
+        coeff_by_node = [dict() for _ in range(num_nodes)]
+        topo_order = graph.topological_sorting(mode="OUT")
+
+        for node_id in reversed(topo_order):
+            coeffs = {node_id: 1.0}
+            parent_ids = graph.neighbors(node_id, mode="OUT")
+            if parent_ids:
+                scale = 1.0 / len(parent_ids)
+                for parent_id in parent_ids:
+                    parent_coeffs = coeff_by_node[parent_id]
+                    for ancestor_id, weight in parent_coeffs.items():
+                        coeffs[ancestor_id] = coeffs.get(ancestor_id, 0.0) + scale * weight
+            coeff_by_node[node_id] = coeffs
+
+        self.ancestor_ids_by_node = [list(coeffs.keys()) for coeffs in coeff_by_node]
+        self.ancestor_weights_by_node = [list(coeffs.values()) for coeffs in coeff_by_node]
 
     def forward(self, node_ids):
         flat_node_ids = node_ids.reshape(-1)
@@ -92,19 +113,26 @@ class HierarchicalEmbedding(torch.nn.Module):
         unique_node_list = unique_node_ids.detach().cpu().tolist()
 
         flat_ancestor_ids = []
+        flat_ancestor_weights = []
         owner_ids = []
 
         for batch_idx, node_id in enumerate(unique_node_list):
-            ancestors = self.ancestor_ids_by_node[node_id]
-            flat_ancestor_ids.extend(ancestors)
-            owner_ids.extend([batch_idx] * len(ancestors))
+            ancestor_ids = self.ancestor_ids_by_node[node_id]
+            ancestor_weights = self.ancestor_weights_by_node[node_id]
+            flat_ancestor_ids.extend(ancestor_ids)
+            flat_ancestor_weights.extend(ancestor_weights)
+            owner_ids.extend([batch_idx] * len(ancestor_ids))
 
         ancestor_index_tensor = torch.tensor(
             flat_ancestor_ids,
             device=flat_node_ids.device,
             dtype=torch.long,
         )
-
+        ancestor_weight_tensor = torch.tensor(
+            flat_ancestor_weights,
+            device=flat_node_ids.device,
+            dtype=self.residual.weight.dtype,
+        )
         owner_index_tensor = torch.tensor(
             owner_ids,
             device=flat_node_ids.device,
@@ -112,12 +140,14 @@ class HierarchicalEmbedding(torch.nn.Module):
         )
 
         ancestor_embeddings = self.residual(ancestor_index_tensor)
+        weighted_ancestor_embeddings = ancestor_embeddings * ancestor_weight_tensor.unsqueeze(1)
+
         unique_embeddings = torch.zeros(
             (unique_node_ids.shape[0], self.residual.embedding_dim),
             device=flat_node_ids.device,
-            dtype=ancestor_embeddings.dtype,
+            dtype=self.residual.weight.dtype,
         )
-        unique_embeddings.index_add_(0, owner_index_tensor, ancestor_embeddings)
+        unique_embeddings.index_add_(0, owner_index_tensor, weighted_ancestor_embeddings)
 
         return unique_embeddings[inverse].reshape(*node_ids.shape, self.residual.embedding_dim)
 
@@ -172,7 +202,7 @@ def main():
 
     pos_dataloader = torch.utils.data.DataLoader(
         dataset=pos_dataset,
-        batch_size=128,
+        batch_size=64,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -180,7 +210,7 @@ def main():
     )
     neg_dataloader = torch.utils.data.DataLoader(
         dataset=neg_dataset,
-        batch_size=128,
+        batch_size=64,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -211,7 +241,12 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     for step_idx, (pos_edges, neg_edges) in enumerate(
-        pbar := tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader), miniters=10)
+        pbar := tqdm(
+            zip(pos_dataloader, neg_dataloader),
+            total=len(pos_dataloader),
+            miniters=10,
+            mininterval=0.5,
+        )
     ):
         pos_edges = pos_edges.to(device, non_blocking=pin_memory)
         neg_edges = neg_edges.to(device, non_blocking=pin_memory)
@@ -234,8 +269,8 @@ def main():
         loss.backward()
         optimizer.step()
 
-        if step_idx % 10 == 0:
-            pbar.set_postfix(loss=f"{loss.item():.4f}", rel_hier=f"{hierarchy_penalty.item():.4f}")
+        if (step_idx + 1) % 10 == 0:
+            pbar.set_postfix(loss=f"{loss.item():.4f}", rel_hier=f"{hierarchy_penalty.item():.4f}", refresh=False)
 
 
 if __name__ == "__main__":
