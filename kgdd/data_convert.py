@@ -189,6 +189,45 @@ def prune_scc_internal_edges(edge_pairs):
     return pruned_edges, removed_edge_count, is_dag
 
 
+def transitive_reduction_dag(edge_pairs):
+    unique_edges = sorted(set(edge_pairs))
+    if not unique_edges:
+        return [], 0
+
+    adjacency = {}
+    for left, right in unique_edges:
+        adjacency.setdefault(left, []).append(right)
+
+    redundant_edges = set()
+
+    for source, children in adjacency.items():
+        if len(children) < 2:
+            continue
+
+        reachable_counts = {}
+        for child in children:
+            stack = [child]
+            seen = {child}
+
+            while stack:
+                current = stack.pop()
+                for nxt in adjacency.get(current, ()):
+                    if nxt in seen:
+                        continue
+                    seen.add(nxt)
+                    stack.append(nxt)
+
+            for node_id in seen:
+                reachable_counts[node_id] = reachable_counts.get(node_id, 0) + 1
+
+        for child in children:
+            if reachable_counts.get(child, 0) >= 2:
+                redundant_edges.add((source, child))
+
+    reduced_edges = [edge for edge in unique_edges if edge not in redundant_edges]
+    return reduced_edges, len(redundant_edges)
+
+
 def stream_edges(edges_file, entity2id, publication_entity_ids):
     relation2id = {}
     edge_count = 0
@@ -245,16 +284,23 @@ def build_and_write_subclass_graph(
 
     category_ancestors = {}
     all_category_labels = set()
+
+    def register_category(category):
+        if category in category_ancestors:
+            return
+        ancestors = toolkit.get_ancestors(category, formatted=True) or [category]
+        category_ancestors[category] = tuple(ancestors)
+        all_category_labels.update(ancestors)
+
     for node_id, categories in node_categories.items():
         entity_id = entity2id.get(node_id)
         if entity_id is None or entity_id in publication_entity_ids:
             continue
-
         for category in categories:
-            if category not in category_ancestors:
-                ancestors = toolkit.get_ancestors(category, formatted=True) or [category]
-                category_ancestors[category] = tuple(ancestors)
-                all_category_labels.update(ancestors)
+            register_category(category)
+
+    if publication_entity_ids:
+        register_category("biolink:Publication")
 
     category_labels = sorted(all_category_labels)
     category2id = {}
@@ -265,15 +311,25 @@ def build_and_write_subclass_graph(
             fout.write(f"{category_label}\n")
 
     extra_edges = set()
+    publication_node_to_category_edges = 0
     for node_id, categories in node_categories.items():
         entity_id = entity2id.get(node_id)
-        if entity_id is None or entity_id in publication_entity_ids:
+        if entity_id is None:
             continue
 
-        for category in categories:
+        if entity_id in publication_entity_ids:
+            categories_to_use = ("biolink:Publication",)
+        else:
+            categories_to_use = categories
+
+        for category in categories_to_use:
             category_id = category2id.get(category)
-            if category_id is not None and entity_id != category_id:
-                extra_edges.add((entity_id, category_id))
+            if category_id is None or entity_id == category_id:
+                continue
+            edge = (entity_id, category_id)
+            if edge not in extra_edges and entity_id in publication_entity_ids:
+                publication_node_to_category_edges += 1
+            extra_edges.add(edge)
 
             ancestors = category_ancestors.get(category, (category,))
             for child_category, parent_category in zip(ancestors, ancestors[1:]):
@@ -285,9 +341,14 @@ def build_and_write_subclass_graph(
     final_edges, removed_augmented_scc_edges, final_is_dag = prune_scc_internal_edges(
         list(pruned_node_edges) + list(extra_edges)
     )
+    reduced_final_edges, removed_transitive_edges = transitive_reduction_dag(final_edges)
+
+    total_entities = base_entity_count + len(category2id)
+    touched_nodes = {node_id for edge in reduced_final_edges for node_id in edge}
+    orphan_nodes = total_entities - len(touched_nodes)
 
     with open(SUBCLASS_EDGE_LIST_PATH, "w") as fout:
-        for head_id, tail_id in final_edges:
+        for head_id, tail_id in reduced_final_edges:
             fout.write(f"{head_id}\t{tail_id}\n")
 
     return {
@@ -296,11 +357,14 @@ def build_and_write_subclass_graph(
         "node_edges_after_pruning": len(pruned_node_edges),
         "removed_node_scc_edges": removed_node_scc_edges,
         "node_graph_is_dag": node_graph_is_dag,
+        "publication_node_to_category_edges": publication_node_to_category_edges,
         "node_to_category_edges": sum(1 for edge in extra_edges if edge[0] < base_entity_count and edge[1] >= base_entity_count),
         "category_to_category_edges": sum(1 for edge in extra_edges if edge[0] >= base_entity_count and edge[1] >= base_entity_count),
         "removed_augmented_scc_edges": removed_augmented_scc_edges,
-        "final_edges": len(final_edges),
+        "removed_transitive_edges": removed_transitive_edges,
+        "final_edges": len(reduced_final_edges),
         "final_is_dag": final_is_dag,
+        "orphan_nodes": orphan_nodes,
     }
 
 
@@ -316,11 +380,13 @@ def write_relation_hierarchy_edge_list(relation2id, toolkit):
                 continue
             hierarchy_edges.add((child_id, parent_id))
 
+    reduced_hierarchy_edges, removed_transitive_edges = transitive_reduction_dag(hierarchy_edges)
+
     with open(RELATION_HIERARCHY_EDGE_LIST_PATH, "w") as fout:
-        for child_id, parent_id in sorted(hierarchy_edges):
+        for child_id, parent_id in reduced_hierarchy_edges:
             fout.write(f"{child_id}\t{parent_id}\n")
 
-    return len(hierarchy_edges)
+    return len(reduced_hierarchy_edges), removed_transitive_edges
 
 
 def write_mapping(mapping, path):
@@ -332,36 +398,39 @@ def write_mapping(mapping, path):
 def main():
     toolkit = bmt.Toolkit()
 
-    print("Loading nodes...")
+    print("=== Knowledge Graph Conversion ===")
+    print("Step 1/5: Load nodes")
     entity2id, entity_names, publication_node_ids, node_categories = build_entity_index(NODES_FILE)
-    print(f"Raw entities: {len(entity2id):,}")
-    print(f"Publication nodes: {len(publication_node_ids):,}")
+    print(f"  Total input nodes: {len(entity2id):,}")
+    print(f"  Input publication nodes: {len(publication_node_ids):,}")
 
-    print("Collapsing exact matches...")
+    print("Step 2/5: Collapse exact-match entities")
     parent, merge_count = collapse_exact_matches(EDGES_FILE, entity2id)
     base_entity_count, collapsed_entities = write_entities(entity2id, entity_names, parent)
-    print(f"Exact-match unions: {merge_count:,}")
-    print(f"Collapsed entities: {collapsed_entities:,}")
-    print(f"Entities after collapse: {base_entity_count:,}")
+    print(f"  Exact-match unions applied: {merge_count:,}")
+    print(f"  Multi-node collapsed entities: {collapsed_entities:,}")
+    print(f"  Entity rows written (pre-category): {base_entity_count:,}")
 
     publication_entity_ids = {
         entity2id[node_id]
         for node_id in publication_node_ids
         if node_id in entity2id
     }
-    print(f"Publication entities after collapse: {len(publication_entity_ids):,}")
+    print(f"  Publication entities after collapse: {len(publication_entity_ids):,}")
 
-    print("Streaming edges...")
+    print("Step 3/5: Stream non-subclass edges and collect raw subclass edges")
     (
         relation2id,
         edge_count,
         raw_subclass_edges,
         skipped_publication_subclass_edges,
     ) = stream_edges(EDGES_FILE, entity2id, publication_entity_ids)
-    print(f"Relations: {len(relation2id):,}")
-    print(f"Edges kept: {edge_count:,}")
+    print(f"  Relation types retained for training graph: {len(relation2id):,}")
+    print(f"  Training edges written to edges.bin: {edge_count:,}")
+    print(f"  Raw node->node subclass edges collected: {len(raw_subclass_edges):,}")
+    print(f"  Raw subclass edges skipped (publication endpoint): {skipped_publication_subclass_edges:,}")
 
-    print("Building subclass graph...")
+    print("Step 4/5: Build subclass hierarchy graph")
     subclass_stats = build_and_write_subclass_graph(
         raw_subclass_edges,
         entity2id,
@@ -370,25 +439,30 @@ def main():
         base_entity_count,
         toolkit,
     )
-    print(f"Category nodes added: {subclass_stats['category_nodes']:,}")
-    print(f"Entities after adding categories: {base_entity_count + subclass_stats['category_nodes']:,}")
-    print(f"Subclass node-node edges before pruning: {subclass_stats['node_edges_before_pruning']:,}")
-    print(f"Subclass edges skipped for publications: {skipped_publication_subclass_edges:,}")
-    print(f"Subclass node-node edges removed inside SCCs: {subclass_stats['removed_node_scc_edges']:,}")
-    print(f"Subclass node-node edges after pruning: {subclass_stats['node_edges_after_pruning']:,}")
-    print(f"Subclass node-node graph is DAG: {subclass_stats['node_graph_is_dag']}")
-    print(f"Synthetic node->category edges: {subclass_stats['node_to_category_edges']:,}")
-    print(f"Synthetic category->category edges: {subclass_stats['category_to_category_edges']:,}")
-    print(f"Subclass edges removed after augmentation SCC pruning: {subclass_stats['removed_augmented_scc_edges']:,}")
-    print(f"Subclass edges written: {subclass_stats['final_edges']:,}")
-    print(f"Subclass graph is DAG: {subclass_stats['final_is_dag']}")
+    print(f"  Synthetic category nodes added to entities.txt: {subclass_stats['category_nodes']:,}")
+    print(f"  Total entities after category expansion: {base_entity_count + subclass_stats['category_nodes']:,}")
+    print(f"  Node->node subclass edges before SCC pruning: {subclass_stats['node_edges_before_pruning']:,}")
+    print(f"  Node->node subclass edges removed in SCC pruning: {subclass_stats['removed_node_scc_edges']:,}")
+    print(f"  Node->node subclass edges after SCC pruning: {subclass_stats['node_edges_after_pruning']:,}")
+    print(f"  Node->node subclass graph DAG check: {subclass_stats['node_graph_is_dag']}")
+    print(f"  Publication node->biolink:Publication edges added: {subclass_stats['publication_node_to_category_edges']:,}")
+    print(f"  Synthetic node->category edges added: {subclass_stats['node_to_category_edges']:,}")
+    print(f"  Synthetic category->category edges added: {subclass_stats['category_to_category_edges']:,}")
+    print(f"  Augmented subclass edges removed in SCC pruning: {subclass_stats['removed_augmented_scc_edges']:,}")
+    print(f"  Augmented subclass edges removed in transitive reduction: {subclass_stats['removed_transitive_edges']:,}")
+    print(f"  Final subclass edges written to subclass_edge_list.txt: {subclass_stats['final_edges']:,}")
+    print(f"  Final subclass graph DAG check: {subclass_stats['final_is_dag']}")
+    print(f"  Orphan entities after final subclass DAG (no incident subclass edge): {subclass_stats['orphan_nodes']:,}")
 
-    print("Writing mappings...")
+    print("Step 5/5: Write relation mappings and relation hierarchy")
     write_mapping(relation2id, RELATIONS_PATH)
-    hierarchy_edge_count = write_relation_hierarchy_edge_list(relation2id, toolkit)
-    print(f"Relation hierarchy edges written: {hierarchy_edge_count:,}")
+    hierarchy_edge_count, hierarchy_reduction_count = write_relation_hierarchy_edge_list(relation2id, toolkit)
+    print(f"  Relation labels written to relations.txt: {len(relation2id):,}")
+    print(f"  Final relation hierarchy edges written: {hierarchy_edge_count:,}")
+    print(f"  Relation hierarchy edges removed in transitive reduction: {hierarchy_reduction_count:,}")
 
-    print("Done.")
+    print("=== Conversion Complete ===")
+    print(f"Outputs: {ENTITIES_PATH}, {RELATIONS_PATH}, {EDGES_BIN_PATH}, {SUBCLASS_EDGE_LIST_PATH}, {RELATION_HIERARCHY_EDGE_LIST_PATH}")
 
 
 if __name__ == "__main__":

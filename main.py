@@ -30,6 +30,18 @@ def load_hierarchy(path, num_nodes):
     return edges
 
 
+def build_direct_relation_parents(num_relations, relation_hierarchy_edges):
+    graph = ig.Graph(n=num_relations, edges=relation_hierarchy_edges, directed=True)
+    parent_ids = list(range(num_relations))
+
+    for relation_id in range(num_relations):
+        parents = graph.neighbors(relation_id, mode="OUT")
+        if parents:
+            parent_ids[relation_id] = min(parents)
+
+    return torch.tensor(parent_ids, dtype=torch.long)
+
+
 class PositiveDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir):
         edges_path = data_dir + "edges.bin"
@@ -160,7 +172,7 @@ def main():
 
     pos_dataloader = torch.utils.data.DataLoader(
         dataset=pos_dataset,
-        batch_size=64,
+        batch_size=128,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -168,7 +180,7 @@ def main():
     )
     neg_dataloader = torch.utils.data.DataLoader(
         dataset=neg_dataset,
-        batch_size=64,
+        batch_size=128,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -183,6 +195,10 @@ def main():
         DATA_DIR + "relation_hierarchy_edge_list.txt",
         len(pos_dataset.relations_map),
     )
+    direct_relation_parents = build_direct_relation_parents(
+        len(pos_dataset.relations_map),
+        relation_hierarchy_edges,
+    ).to(device)
 
     model = Model(
         n_entities=len(pos_dataset.entities_map),
@@ -202,14 +218,24 @@ def main():
         pos_scores = model(pos_edges)
         neg_scores = model(neg_edges)
 
-        loss = torch.nn.functional.softplus(-pos_scores).mean() + torch.nn.functional.softplus(neg_scores).mean()
+        general_edges = pos_edges.clone()
+        general_relation_ids = direct_relation_parents[pos_edges[:, 1]]
+        general_edges[:, 1] = general_relation_ids
+        general_scores = model(general_edges)
+
+        base_loss = torch.nn.functional.softplus(-pos_scores).mean() + torch.nn.functional.softplus(neg_scores).mean()
+
+        # This enforces that P(e1 r1 e2) < P(e1 r2 e2), where r1 (specific relation) is a ancestor of r2 (general relation).
+        hierarchy_penalty = torch.nn.functional.relu(pos_scores - general_scores).squeeze(1).mean()
+
+        loss = base_loss + 1.0 * hierarchy_penalty
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         if step_idx % 10 == 0:
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            pbar.set_postfix(loss=f"{loss.item():.4f}", rel_hier=f"{hierarchy_penalty.item():.4f}")
 
 
 if __name__ == "__main__":
