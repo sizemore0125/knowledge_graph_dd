@@ -30,12 +30,15 @@ def load_hierarchy(path, num_nodes):
     return edges
 
 
-def build_direct_relation_parents(num_relations, relation_hierarchy_edges):
-    graph = ig.Graph(n=num_relations, edges=relation_hierarchy_edges, directed=True)
+def load_edges(path):
+    return np.memmap(path, dtype=np.int32, mode="r").reshape(-1, 3)
+
+
+def build_direct_relation_parents(num_relations, relation_hierarchy):
     parent_ids = list(range(num_relations))
 
     for relation_id in range(num_relations):
-        parents = graph.neighbors(relation_id, mode="OUT")
+        parents = relation_hierarchy.neighbors(relation_id, mode="OUT")
         if parents:
             parent_ids[relation_id] = min(parents)
 
@@ -43,13 +46,8 @@ def build_direct_relation_parents(num_relations, relation_hierarchy_edges):
 
 
 class PositiveDataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir):
-        edges_path = data_dir + "edges.bin"
-
-        self.edges = np.memmap(edges_path, dtype=np.int32, mode="r").reshape(-1, 3)
-
-        self.entities_map = load_data(data_dir + "entities.txt")
-        self.relations_map = load_data(data_dir + "relations.txt")
+    def __init__(self, edges):
+        self.edges = edges
 
     def __len__(self):
         return self.edges.shape[0]
@@ -79,23 +77,22 @@ class NegativeDataset(torch.utils.data.Dataset):
 
 
 class HierarchicalEmbedding(torch.nn.Module):
-    def __init__(self, num_nodes, dim, edges):
+    def __init__(self, num_nodes, dim, hierarchy):
         super().__init__()
         self.num_nodes = num_nodes
         self.residual = torch.nn.Embedding(num_nodes, dim)
-        graph = ig.Graph(n=num_nodes, edges=edges, directed=True)
 
-        if not graph.is_dag():
+        if not hierarchy.is_dag():
             raise ValueError("HierarchicalEmbedding requires a DAG (child -> parent).")
 
         # Precompute coefficients for:
         # E(v) = Delta(v) + mean(E(parent(v)))
         coeff_by_node = [dict() for _ in range(num_nodes)]
-        topo_order = graph.topological_sorting(mode="OUT")
+        topo_order = hierarchy.topological_sorting(mode="OUT")
 
         for node_id in reversed(topo_order):
             coeffs = {node_id: 1.0}
-            parent_ids = graph.neighbors(node_id, mode="OUT")
+            parent_ids = hierarchy.neighbors(node_id, mode="OUT")
             if parent_ids:
                 scale = 1.0 / len(parent_ids)
                 for parent_id in parent_ids:
@@ -157,13 +154,13 @@ class Model(torch.nn.Module):
         self,
         n_entities,
         n_relations,
-        entity_hierarchy_edges,
-        relation_hierarchy_edges,
+        entity_hierarchy,
+        relation_hierarchy,
         emb_dim=8,
     ):
         super().__init__()
-        self.entity_codebook = HierarchicalEmbedding(n_entities, emb_dim, entity_hierarchy_edges)
-        self.relation_codebook = HierarchicalEmbedding(n_relations, emb_dim, relation_hierarchy_edges)
+        self.entity_codebook = HierarchicalEmbedding(n_entities, emb_dim, entity_hierarchy)
+        self.relation_codebook = HierarchicalEmbedding(n_relations, emb_dim, relation_hierarchy)
         self.emb_dim = emb_dim
 
         self.input_layer = torch.nn.Linear(emb_dim * 3, 512)
@@ -189,16 +186,48 @@ class Model(torch.nn.Module):
 
 
 def main():
-    pos_dataset = PositiveDataset(DATA_DIR)
-    neg_dataset = NegativeDataset(
-        num_relations=len(pos_dataset.relations_map),
-        num_entities=len(pos_dataset.entities_map),
-        num_datapoints=len(pos_dataset),
-    )
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_workers = min(6, os.cpu_count() or 1)
     pin_memory = device.type == "cuda"
+
+    entities_map = load_data(DATA_DIR + "entities.txt")
+    relations_map = load_data(DATA_DIR + "relations.txt")
+    num_entities = len(entities_map)
+    num_relations = len(relations_map)
+
+    entity_hierarchy_edges = load_hierarchy(
+        DATA_DIR + "subclass_edge_list.txt",
+        num_entities,
+    )
+
+    relation_hierarchy_edges = load_hierarchy(
+        DATA_DIR + "relation_hierarchy_edge_list.txt",
+        num_relations,
+    )
+
+    entity_hierarchy = ig.Graph(
+        n=num_entities,
+        edges=entity_hierarchy_edges,
+        directed=True,
+    )
+    entity_hierarchy.vs["name"] = entities_map
+
+    relation_hierarchy = ig.Graph(
+        n=num_relations,
+        edges=relation_hierarchy_edges,
+        directed=True,
+    )
+    relation_hierarchy.vs["name"] = relations_map
+
+    knowledge_graph_edges = load_edges(DATA_DIR + "edges.bin")
+
+    pos_dataset = PositiveDataset(edges=knowledge_graph_edges)
+
+    neg_dataset = NegativeDataset(
+        num_relations=num_relations,
+        num_entities=num_entities,
+        num_datapoints=len(pos_dataset),
+    )
 
     pos_dataloader = torch.utils.data.DataLoader(
         dataset=pos_dataset,
@@ -208,6 +237,7 @@ def main():
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
     )
+
     neg_dataloader = torch.utils.data.DataLoader(
         dataset=neg_dataset,
         batch_size=64,
@@ -217,24 +247,16 @@ def main():
         persistent_workers=num_workers > 0,
     )
 
-    entity_hierarchy_edges = load_hierarchy(
-        DATA_DIR + "subclass_edge_list.txt",
-        len(pos_dataset.entities_map),
-    )
-    relation_hierarchy_edges = load_hierarchy(
-        DATA_DIR + "relation_hierarchy_edge_list.txt",
-        len(pos_dataset.relations_map),
-    )
     direct_relation_parents = build_direct_relation_parents(
-        len(pos_dataset.relations_map),
-        relation_hierarchy_edges,
+        num_relations,
+        relation_hierarchy,
     ).to(device)
 
     model = Model(
-        n_entities=len(pos_dataset.entities_map),
-        n_relations=len(pos_dataset.relations_map),
-        entity_hierarchy_edges=entity_hierarchy_edges,
-        relation_hierarchy_edges=relation_hierarchy_edges,
+        n_entities=num_entities,
+        n_relations=num_relations,
+        entity_hierarchy=entity_hierarchy,
+        relation_hierarchy=relation_hierarchy,
     ).to(device)
     model.train()
 
