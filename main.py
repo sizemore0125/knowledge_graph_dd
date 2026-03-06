@@ -6,6 +6,7 @@ import bmt
 
 import torch
 from tqdm import tqdm
+from kgdd.rule_penalties import RulePenalties
 
 DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/processed/"
 
@@ -33,28 +34,31 @@ def load_edges(path):
     return np.memmap(path, dtype=np.int32, mode="r").reshape(-1, 3)
 
 
-def build_direct_relation_parents(num_relations, relation_hierarchy):
-    parent_ids = list(range(num_relations))
-
-    for relation_id in range(num_relations):
-        parents = relation_hierarchy.neighbors(relation_id, mode="OUT")
-        if parents:
-            parent_ids[relation_id] = min(parents)
-
-    return torch.tensor(parent_ids, dtype=torch.long)
-
-
 class PositiveDataset(torch.utils.data.Dataset):
-    def __init__(self, edges):
+    def __init__(self, edges, relation_hierarchy: ig.Graph):
         self.edges = edges
+        num_relations = relation_hierarchy.vcount()
+        parent_ids = list(range(num_relations))
+        for relation_id in range(num_relations):
+            parents = relation_hierarchy.neighbors(relation_id, mode="OUT")
+            if parents:
+                parent_ids[relation_id] = min(parents)
+        self.direct_relation_parents = np.asarray(parent_ids, dtype=np.int64)
 
     def __len__(self):
         return self.edges.shape[0]
 
     def __getitem__(self, idx):
-        edge = torch.tensor(self.edges[idx], dtype=torch.long)
+        edge_np = np.asarray(self.edges[idx], dtype=np.int64)
+        general_edge_np = edge_np.copy()
+        general_edge_np[1] = self.direct_relation_parents[edge_np[1]]
+
+        edge = torch.tensor(edge_np, dtype=torch.long)
+        general_edge = torch.tensor(general_edge_np, dtype=torch.long)
         label = torch.tensor(1.0, dtype=torch.float32)
-        return edge, label
+        task_id = torch.tensor(0, dtype=torch.long)
+
+        return edge, general_edge, label, task_id
 
 
 class NegativeDataset(torch.utils.data.Dataset):
@@ -72,8 +76,12 @@ class NegativeDataset(torch.utils.data.Dataset):
         relation = torch.randint(0, self.num_relations, ()).item()
         entity2 = torch.randint(0, self.num_entities, ()).item()
         edge = torch.tensor([entity1, relation, entity2], dtype=torch.long)
+
+        dummy_edge = torch.tensor([-1, -1, -1], dtype=torch.long)
         label = torch.tensor(0.0, dtype=torch.float32)
-        return edge, label
+        task_id = torch.tensor(0, dtype=torch.long)
+
+        return edge, dummy_edge, label, task_id
 
 
 class DomainRangeDataset(torch.utils.data.Dataset):
@@ -232,8 +240,12 @@ class DomainRangeDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.edge_tensor[idx], self.true_edge_tensor[idx], self.label_tensor[idx]
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        edge = self.edge_tensor[idx]
+        true_edge = self.true_edge_tensor[idx]
+        label = self.label_tensor[idx]
+        task_id = torch.tensor(1, dtype=torch.long)
+        return edge, true_edge, label, task_id
 
 
 class HierarchicalEmbedding(torch.nn.Module):
@@ -364,7 +376,7 @@ class Model(torch.nn.Module):
         return y_pred
 
 
-def main():
+def main(num_epochs=3):
     entities_path = DATA_DIR + "entities.txt"
     relations_path = DATA_DIR + "relations.txt"
 
@@ -393,7 +405,10 @@ def main():
 
     knowledge_graph_edges = load_edges(knowledge_graph_edges_path)
 
-    pos_dataset = PositiveDataset(edges=knowledge_graph_edges)
+    pos_dataset = PositiveDataset(
+        edges=knowledge_graph_edges,
+        relation_hierarchy=relation_hierarchy,
+    )
     neg_dataset = NegativeDataset(
         num_relations=num_relations,
         num_entities=num_entities,
@@ -405,8 +420,7 @@ def main():
         relation_hierarchy=relation_hierarchy,
         num_samples=len(pos_dataset),
     )
-    breakpoint()
-    dataset = torch.utils.data.ConcatDataset([pos_dataset, neg_dataset])
+    dataset = torch.utils.data.ConcatDataset([pos_dataset, neg_dataset, domain_range_dataset])
 
     train_dataloader = torch.utils.data.DataLoader(
         dataset=dataset,
@@ -417,11 +431,6 @@ def main():
         persistent_workers=num_workers > 0,
     )
 
-    direct_relation_parents = build_direct_relation_parents(
-        num_relations,
-        relation_hierarchy,
-    ).to(device)
-
     model = Model(
         n_entities=num_entities,
         n_relations=num_relations,
@@ -429,46 +438,62 @@ def main():
         relation_hierarchy=relation_hierarchy,
     ).to(device)
     model.train()
+    rule_penalties = RulePenalties(model)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    for step_idx, (edges, labels) in enumerate(
-        pbar := tqdm(
-            train_dataloader,
-            total=len(train_dataloader),
-            miniters=50,
-            mininterval=1,
-        )
-    ):
-        edges = edges.to(device, non_blocking=pin_memory)
-        labels = labels.to(device, non_blocking=pin_memory).unsqueeze(1)
+    for epoch_idx in range(num_epochs):
+        for step_idx, (edges, aux_edges, labels, task_ids) in enumerate(
+            pbar := tqdm(
+                train_dataloader,
+                total=len(train_dataloader),
+                miniters=50,
+                mininterval=1,
+                desc=f"Epoch {epoch_idx + 1}/{num_epochs}",
+            )
+        ):
+            edges = edges.to(device, non_blocking=pin_memory)
+            aux_edges = aux_edges.to(device, non_blocking=pin_memory)
+            labels = labels.to(device, non_blocking=pin_memory).unsqueeze(1)
+            task_ids = task_ids.to(device, non_blocking=pin_memory)
 
-        logits = model(edges)
-        base_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
+            logits = model(edges)
+            base_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
-        pos_mask = labels.squeeze(1) > 0.5
-        if pos_mask.any():
-            pos_edges = edges[pos_mask]
-            pos_scores = logits[pos_mask]
+            kg_pos_mask = (task_ids == 0) & (labels.squeeze(1) > 0.5)
+            if kg_pos_mask.any():
+                pos_scores = logits[kg_pos_mask]
+                general_edges = aux_edges[kg_pos_mask]
+                general_scores = model(general_edges)
 
-            general_edges = pos_edges.clone()
-            general_relation_ids = direct_relation_parents[pos_edges[:, 1]]
-            general_edges[:, 1] = general_relation_ids
-            general_scores = model(general_edges)
+                # This enforces that P(e1 r1 e2) < P(e1 r2 e2), where r1 (specific relation) is a ancestor of r2 (general relation).
+                hierarchy_penalty = torch.nn.functional.relu(pos_scores - general_scores).squeeze(1).mean()
+            else:
+                hierarchy_penalty = torch.tensor(0.0, device=device)
 
-            # This enforces that P(e1 r1 e2) < P(e1 r2 e2), where r1 (specific relation) is a ancestor of r2 (general relation).
-            hierarchy_penalty = torch.nn.functional.relu(pos_scores - general_scores).squeeze(1).mean()
-        else:
-            hierarchy_penalty = torch.tensor(0.0, device=device)
+            domain_range_mask = task_ids == 1
+            if domain_range_mask.any():
+                rule_penalty = rule_penalties.domain_range_loss(
+                    edges=edges[domain_range_mask],
+                    true_edges=aux_edges[domain_range_mask],
+                    logits=logits[domain_range_mask],
+                )
+            else:
+                rule_penalty = torch.tensor(0.0, device=device)
 
-        loss = base_loss + 1.0 * hierarchy_penalty
+            loss = base_loss + 1.0 * hierarchy_penalty + 1.0 * rule_penalty
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        if (step_idx + 1) % 50 == 0:
-            pbar.set_postfix(loss=f"{loss.item():.4f}", rel_hier=f"{hierarchy_penalty.item():.4f}", refresh=False)
+            if (step_idx + 1) % 50 == 0:
+                pbar.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    rel_hier=f"{hierarchy_penalty.item():.4f}",
+                    rule=f"{rule_penalty.item():.4f}",
+                    refresh=False,
+                )
 
 
 if __name__ == "__main__":
