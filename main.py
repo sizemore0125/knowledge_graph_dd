@@ -385,6 +385,9 @@ def main(num_epochs=3):
 
     knowledge_graph_edges_path = DATA_DIR + "edges.bin"
 
+    checkpoint_dir = "/home/logansizemore/Documents/knowledge_graph_dd/checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_workers = min(1, os.cpu_count() or 1)
     pin_memory = device.type == "cuda"
@@ -486,6 +489,10 @@ def main(num_epochs=3):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            if step_idx % 5000 == 0:
+                checkpoint_path = os.path.join(checkpoint_dir, f"model.pt")
+                torch.save(model.state_dict(), checkpoint_path)
 
             if (step_idx + 1) % 50 == 0:
                 pbar.set_postfix(
