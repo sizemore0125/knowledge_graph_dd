@@ -490,10 +490,6 @@ def main(num_epochs=3):
             loss.backward()
             optimizer.step()
 
-            if step_idx % 5000 == 0:
-                checkpoint_path = os.path.join(checkpoint_dir, f"model.pt")
-                torch.save(model.state_dict(), checkpoint_path)
-
             if (step_idx + 1) % 50 == 0:
                 pbar.set_postfix(
                     loss=f"{loss.item():.4f}",
@@ -501,6 +497,10 @@ def main(num_epochs=3):
                     rule=f"{rule_penalty.item():.4f}",
                     refresh=False,
                 )
+
+            if step_idx % 5000 == 0:
+                checkpoint_path = os.path.join(checkpoint_dir, f"model.pt")
+                torch.save(model.state_dict(), checkpoint_path)
 
 
 if __name__ == "__main__":
