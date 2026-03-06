@@ -2,6 +2,7 @@ import os
 
 import igraph as ig
 import numpy as np
+import bmt
 
 import torch
 from tqdm import tqdm
@@ -81,65 +82,158 @@ class DomainRangeDataset(torch.utils.data.Dataset):
         edges: np.ndarray,
         entity_hierarchy: ig.Graph,
         relation_hierarchy: ig.Graph,
-        relation_id: str,
-        domain_labels: list[str],
-        range_labels: list[str],
         num_samples: int,
-        mode: str,
     ) -> None:
         self.edges = edges
-        self.relation_id = relation_id
+        self.entity_hierarchy = entity_hierarchy
+        self.relation_hierarchy = relation_hierarchy
+        self.toolkit = bmt.Toolkit()
         self.num_samples = num_samples
-        self.mode = mode
 
-        relation_ids = np.asarray(
-            relation_hierarchy.subcomponent(relation_id, mode="IN"),
-            dtype=np.int32,
-        )
-        relation_mask = np.isin(self.edges[:, 1], relation_ids)
-        self.pos_graph_edges = self.edges[relation_mask]
+        self.relation_specs = self.build_relation_specs()
+        self.resample()
 
-        self.domain_pool = self.expand_labels(entity_hierarchy, domain_labels)
-        self.range_pool = self.expand_labels(entity_hierarchy, range_labels)
+    def normalize_name(self, name: str) -> str:
+        return name.replace("biolink:", "")
 
-        all_entities = np.arange(entity_hierarchy.vcount(), dtype=np.int64)
-        self.out_domain_pool = all_entities[~np.isin(all_entities, self.domain_pool)]
-        self.out_range_pool = all_entities[~np.isin(all_entities, self.range_pool)]
+    def expand_category(self, category_name: str) -> np.ndarray:
+        node_ids = self.entity_hierarchy.subcomponent(category_name, mode="IN")
+        return np.asarray(node_ids, dtype=np.int64)
 
-    def expand_labels(self, hierarchy: ig.Graph, labels: list[str]) -> np.ndarray:
-        node_ids = []
-        for label in labels:
-            root_id = hierarchy.vs.find(name=label).index
-            node_ids.extend(hierarchy.subcomponent(root_id, mode="IN"))
-        return np.unique(np.asarray(node_ids, dtype=np.int64))
+    def build_relation_specs(self) -> list[dict]:
+        specs = []
+        all_entities = np.arange(self.entity_hierarchy.vcount(), dtype=np.int64)
+
+        for relation_id, relation_name in tqdm(enumerate(self.relation_hierarchy.vs["name"]), desc="Characterizing DR Dataset:"):
+            # Get Domain and Range names for Relation
+            relation_slot = self.toolkit.get_element(relation_name)
+
+            if relation_slot is None:
+                continue
+
+            if relation_slot.domain is None or relation_slot.range is None:
+                continue
+
+            domain_element = self.toolkit.get_element(relation_slot.domain)
+            range_element = self.toolkit.get_element(relation_slot.range)
+
+            if domain_element is None or range_element is None:
+                continue
+
+            domain_name = self.normalize_name(domain_element.class_uri)
+            range_name = self.normalize_name(range_element.class_uri)
+
+            # Get ID for Domain and Range
+            try:
+                domain_category_id = self.entity_hierarchy.vs.find(name=domain_name).index
+                range_category_id = self.entity_hierarchy.vs.find(name=range_name).index
+            except ValueError:
+                continue
+
+            # Get all entities that belong to domain/range categories.
+            domain_pool = self.expand_category(domain_name)
+            range_pool = self.expand_category(range_name)
+
+            if len(domain_pool) == 0 or len(range_pool) == 0:
+                continue
+
+            # Get complement of domain/range
+            out_domain_pool = all_entities[~np.isin(all_entities, domain_pool)]
+            out_range_pool = all_entities[~np.isin(all_entities, range_pool)]
+
+            if len(out_domain_pool) == 0 or len(out_range_pool) == 0:
+                continue
+
+            # Get all edges in KG with that relation.
+            relation_mask = self.edges[:, 1] == relation_id
+            graph_edges = np.asarray(self.edges[relation_mask], dtype=np.int64)
+
+            if len(graph_edges) == 0:
+                continue
+
+            # Make knowledge graph edges a tuple.
+            graph_edge_set = {(int(head_id), int(rel_id), int(tail_id)) for head_id, rel_id, tail_id in graph_edges}
+
+            specs.append(
+                {
+                    "relation_id": relation_id,
+                    "domain_pool": domain_pool,
+                    "range_pool": range_pool,
+                    "out_domain_pool": out_domain_pool,
+                    "out_range_pool": out_range_pool,
+                    "graph_edges": graph_edges,
+                    "graph_edge_set": graph_edge_set,
+                    "true_edge": [domain_category_id, relation_id, range_category_id],
+                }
+            )
+
+        return specs
+
+    def sample_in_graph(self, spec: dict) -> tuple[np.ndarray, float]:
+        edge = spec["graph_edges"][np.random.randint(len(spec["graph_edges"]))]
+        return edge, 1.0
+
+    def sample_rule_valid_not_in_graph(self, spec: dict) -> tuple[np.ndarray, float]:
+        relation_id = spec["relation_id"]
+        for _ in range(100):
+            head_id = int(spec["domain_pool"][np.random.randint(len(spec["domain_pool"]))])
+            tail_id = int(spec["range_pool"][np.random.randint(len(spec["range_pool"]))])
+            edge = (head_id, relation_id, tail_id)
+            if edge not in spec["graph_edge_set"]:
+                return np.asarray(edge, dtype=np.int64), 0.0
+        return self.sample_rule_breaking_not_in_graph(spec)
+
+    def sample_rule_breaking_not_in_graph(self, spec: dict) -> tuple[np.ndarray, float]:
+        relation_id = spec["relation_id"]
+        for _ in range(100):
+            case_id = np.random.randint(3)
+            if case_id == 0:
+                head_id = int(spec["out_domain_pool"][np.random.randint(len(spec["out_domain_pool"]))])
+                tail_id = int(spec["range_pool"][np.random.randint(len(spec["range_pool"]))])
+            elif case_id == 1:
+                head_id = int(spec["domain_pool"][np.random.randint(len(spec["domain_pool"]))])
+                tail_id = int(spec["out_range_pool"][np.random.randint(len(spec["out_range_pool"]))])
+            else:
+                head_id = int(spec["out_domain_pool"][np.random.randint(len(spec["out_domain_pool"]))])
+                tail_id = int(spec["out_range_pool"][np.random.randint(len(spec["out_range_pool"]))])
+
+            edge = (head_id, relation_id, tail_id)
+            if edge not in spec["graph_edge_set"]:
+                return np.asarray(edge, dtype=np.int64), 0.0
+
+        head_id = int(spec["out_domain_pool"][np.random.randint(len(spec["out_domain_pool"]))])
+        tail_id = int(spec["out_range_pool"][np.random.randint(len(spec["out_range_pool"]))])
+        return np.asarray([head_id, relation_id, tail_id], dtype=np.int64), 0.0
+
+    def resample(self) -> None:
+        edges = []
+        true_edges = []
+        labels = []
+
+        for sample_idx in tqdm(range(self.num_samples), desc="Building Dataset: ", miniters=1000):
+            spec = self.relation_specs[np.random.randint(len(self.relation_specs))]
+            draw = np.random.rand()
+
+            if draw < 0.5:
+                edge, label = self.sample_in_graph(spec)
+            elif draw < 0.75:
+                edge, label = self.sample_rule_valid_not_in_graph(spec)
+            else:
+                edge, label = self.sample_rule_breaking_not_in_graph(spec)
+
+            edges.append(edge)
+            true_edges.append(spec["true_edge"])
+            labels.append(label)
+
+        self.edge_tensor = torch.tensor(np.asarray(edges, dtype=np.int64), dtype=torch.long)
+        self.true_edge_tensor = torch.tensor(np.asarray(true_edges, dtype=np.int64), dtype=torch.long)
+        self.label_tensor = torch.tensor(labels, dtype=torch.float32)
 
     def __len__(self) -> int:
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.mode == "positive":
-            if np.random.rand() < 0.5 and len(self.pos_graph_edges) > 0:
-                edge = self.pos_graph_edges[np.random.randint(len(self.pos_graph_edges))]
-                return torch.tensor(edge, dtype=torch.long), torch.tensor(1.0, dtype=torch.float32)
-            else:
-                head_id = self.domain_pool[np.random.randint(len(self.domain_pool))]
-                tail_id = self.range_pool[np.random.randint(len(self.range_pool))]
-                edge = np.array([head_id, self.relation_id, tail_id], dtype=np.int64)
-                return torch.tensor(edge, dtype=torch.long), torch.tensor(0.0, dtype=torch.float32)
-
-        case_id = np.random.randint(3)
-        if case_id == 0:
-            head_id = self.out_domain_pool[np.random.randint(len(self.out_domain_pool))]
-            tail_id = self.range_pool[np.random.randint(len(self.range_pool))]
-        elif case_id == 1:
-            head_id = self.domain_pool[np.random.randint(len(self.domain_pool))]
-            tail_id = self.out_range_pool[np.random.randint(len(self.out_range_pool))]
-        else:
-            head_id = self.out_domain_pool[np.random.randint(len(self.out_domain_pool))]
-            tail_id = self.out_range_pool[np.random.randint(len(self.out_range_pool))]
-
-        edge = torch.tensor([head_id, self.relation_id, tail_id], dtype=torch.long)
-        return edge, torch.tensor(0.0, dtype=torch.float32)
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.edge_tensor[idx], self.true_edge_tensor[idx], self.label_tensor[idx]
 
 
 class HierarchicalEmbedding(torch.nn.Module):
@@ -305,6 +399,13 @@ def main():
         num_entities=num_entities,
         num_datapoints=len(pos_dataset),
     )
+    domain_range_dataset = DomainRangeDataset(
+        edges=knowledge_graph_edges,
+        entity_hierarchy=entity_hierarchy,
+        relation_hierarchy=relation_hierarchy,
+        num_samples=len(pos_dataset),
+    )
+    breakpoint()
     dataset = torch.utils.data.ConcatDataset([pos_dataset, neg_dataset])
 
     train_dataloader = torch.utils.data.DataLoader(
