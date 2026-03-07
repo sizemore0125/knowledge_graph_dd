@@ -40,7 +40,7 @@ def test_accuracy(model, dataloader, device):
     correct = 0
 
     with torch.no_grad():
-        for edges, labels in dataloader:
+        for edges, _, labels, _ in dataloader:
             edges = edges.to(device)
             labels = labels.to(device)
 
@@ -170,7 +170,8 @@ class DomainRangeDataset(torch.utils.data.Dataset):
         self.num_samples = num_samples
 
         self.relation_specs = self.build_relation_specs()
-        self.resample()
+        if len(self.relation_specs) == 0:
+            raise ValueError("DomainRangeDataset has no valid relation specs to sample from.")
 
     def normalize_name(self, name: str) -> str:
         return name.replace("biolink:", "")
@@ -242,7 +243,7 @@ class DomainRangeDataset(torch.utils.data.Dataset):
                     "out_range_pool": out_range_pool,
                     "graph_edges": graph_edges,
                     "graph_edge_set": graph_edge_set,
-                    "true_edge": [domain_category_id, relation_id, range_category_id],
+                    "true_edge": np.asarray([domain_category_id, relation_id, range_category_id], dtype=np.int64),
                 }
             )
 
@@ -284,37 +285,23 @@ class DomainRangeDataset(torch.utils.data.Dataset):
         tail_id = int(spec["out_range_pool"][np.random.randint(len(spec["out_range_pool"]))])
         return np.asarray([head_id, relation_id, tail_id], dtype=np.int64), 0.0
 
-    def resample(self) -> None:
-        edges = []
-        true_edges = []
-        labels = []
-
-        for sample_idx in tqdm(range(self.num_samples), desc="Building Dataset: ", miniters=1000):
-            spec = self.relation_specs[np.random.randint(len(self.relation_specs))]
-            draw = np.random.rand()
-
-            if draw < 0.5:
-                edge, label = self.sample_in_graph(spec)
-            elif draw < 0.75:
-                edge, label = self.sample_rule_valid_not_in_graph(spec)
-            else:
-                edge, label = self.sample_rule_breaking_not_in_graph(spec)
-
-            edges.append(edge)
-            true_edges.append(spec["true_edge"])
-            labels.append(label)
-
-        self.edge_tensor = torch.tensor(np.asarray(edges, dtype=np.int64), dtype=torch.long)
-        self.true_edge_tensor = torch.tensor(np.asarray(true_edges, dtype=np.int64), dtype=torch.long)
-        self.label_tensor = torch.tensor(labels, dtype=torch.float32)
-
     def __len__(self) -> int:
         return self.num_samples
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        edge = self.edge_tensor[idx]
-        true_edge = self.true_edge_tensor[idx]
-        label = self.label_tensor[idx]
+        spec = self.relation_specs[np.random.randint(len(self.relation_specs))]
+        draw = np.random.rand()
+
+        if draw < 0.5:
+            edge_np, label = self.sample_in_graph(spec)
+        elif draw < 0.75:
+            edge_np, label = self.sample_rule_valid_not_in_graph(spec)
+        else:
+            edge_np, label = self.sample_rule_breaking_not_in_graph(spec)
+
+        edge = torch.tensor(edge_np, dtype=torch.long)
+        true_edge = torch.tensor(spec["true_edge"], dtype=torch.long)
+        label = torch.tensor(label, dtype=torch.float32)
         task_id = torch.tensor(1, dtype=torch.long)
         return edge, true_edge, label, task_id
 
@@ -478,32 +465,42 @@ def main(num_epochs=3):
     relation_hierarchy.vs["name"] = relations_map
 
     knowledge_graph_edges = load_edges(knowledge_graph_edges_path)
-    train_edges, test_edges = build_relation_swap_split(
+    train_edges, _ = build_relation_swap_split(
         edges=knowledge_graph_edges,
         relations_map=relations_map,
     )
-    relation_swap_test_dataset = RelationSwapTestDataset(test_edges, relations_map)
 
     pos_dataset = PositiveDataset(
         edges=train_edges,
         relation_hierarchy=relation_hierarchy,
     )
+    train_pos_dataset, test_pos_dataset = torch.utils.data.random_split(pos_dataset, [len(pos_dataset) - 50000, 50000])
+
+    train_pos_indices = np.asarray(train_pos_dataset.indices, dtype=np.int64)
+    train_pos_edges = np.asarray(train_edges[train_pos_indices], dtype=np.int32)
+
     neg_dataset = NegativeDataset(
         num_relations=num_relations,
         num_entities=num_entities,
-        num_datapoints=len(pos_dataset),
+        num_datapoints=len(train_pos_dataset),
+    )
+    neg_test_dataset = NegativeDataset(
+        num_relations=num_relations,
+        num_entities=num_entities,
+        num_datapoints=len(test_pos_dataset),
     )
     domain_range_dataset = DomainRangeDataset(
-        edges=train_edges,
+        edges=train_pos_edges,
         entity_hierarchy=entity_hierarchy,
         relation_hierarchy=relation_hierarchy,
-        num_samples=len(pos_dataset),
+        num_samples=len(train_pos_dataset),
     )
-    dataset = torch.utils.data.ConcatDataset([pos_dataset, neg_dataset, domain_range_dataset])
+    dataset = torch.utils.data.ConcatDataset([train_pos_dataset, neg_dataset, domain_range_dataset])
+    test_dataset = torch.utils.data.ConcatDataset([test_pos_dataset, neg_test_dataset])
 
     train_dataloader = torch.utils.data.DataLoader(
         dataset=dataset,
-        batch_size=512,
+        batch_size=1024,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -511,12 +508,11 @@ def main(num_epochs=3):
     )
 
     test_dataloader = torch.utils.data.DataLoader(
-        dataset=relation_swap_test_dataset,
+        dataset=test_dataset,
         batch_size=1024,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
+        num_workers=0,
+        pin_memory=False,
     )
 
     model = Model(
@@ -569,7 +565,7 @@ def main(num_epochs=3):
             else:
                 rule_penalty = torch.tensor(0.0, device=device)
 
-            loss = base_loss + 1.0 * hierarchy_penalty + 1.0 * rule_penalty
+            loss = base_loss + 0.25 * hierarchy_penalty + 0.25 * rule_penalty
 
             optimizer.zero_grad()
             loss.backward()
@@ -583,10 +579,13 @@ def main(num_epochs=3):
                     refresh=False,
                 )
 
-            if step_idx % 5000 == 0:
-                acc = test_accuracy(model, test_dataloader, device)
-                print(f"test_accuracy={acc:.4f}")
-                checkpoint_path = os.path.join(checkpoint_dir, f"model.pt")
+            if (step_idx) % 5000 == 0:
+                checkpoint_path = os.path.join(checkpoint_dir, "model.pt")
+                try:
+                    acc = test_accuracy(model, test_dataloader, device)
+                    print(f"test_accuracy={acc:.4f}")
+                except Exception as exc:
+                    print(f"test_accuracy_failed={exc}")
                 torch.save(model.state_dict(), checkpoint_path)
 
 
