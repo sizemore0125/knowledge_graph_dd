@@ -4,6 +4,76 @@
 ```
 'subclass_of', 'related_to', 'has_member', 'has_part', 'coexists_with', 'manifestation_of', 'has_phenotype', 'located_in', 'affects', 'in_taxon', 'biomarker_for', 'has_input', 'gene_associated_with_condition', 'has_participant', 'gene_product_of', 'causes', 'derives_from', 'associated_with', 'capable_of', 'regulates', 'produces', 'physically_interacts_with', 'expressed_in', 'correlated_with', 'chemically_similar_to', 'has_metabolite', 'develops_from', 'occurs_in', 'has_output', 'drug_regulatory_status_world_wide', 'precedes', 'actively_involved_in', 'is_sequence_variant_of', 'has_molecular_consequence', 'lacks_part', 'has_plasma_membrane_part', 'has_increased_amount', 'overlaps', 'has_decreased_amount', 'has_not_completed', 'temporally_related_to', 'directly_physically_interacts_with', 'composed_primarily_of', 'homologous_to', 'indirectly_physically_interacts_with', 'disrupts', 'contributes_to', 'exact_match', 'treats', 'disease_has_location', 'disease_has_basis_in', 'broad_match', 'treats_or_applied_or_studied_to_treat', 'interacts_with', 'predisposes_to_condition', 'preventative_for_condition', 'exacerbates_condition', 'diagnoses', 'colocalizes_with', 'enables', 'contraindicated_in', 'applied_to_treat', 'in_clinical_trials_for'
 ```
+
+## Conversion Info:
+=== Knowledge Graph Conversion ===
+Step 1/5: Load nodes
+  Total input nodes: 5,864,272
+  Input publication nodes: 29,736
+Step 2/5: Collapse exact-match entities
+  Exact-match unions applied: 249
+  Multi-node collapsed entities: 188
+  Entity rows written (pre-category): 5,864,023
+  Publication entities after collapse: 29,736
+Step 3/5: Stream non-subclass edges and collect raw subclass edges
+1,000,000 edges written
+2,000,000 edges written
+3,000,000 edges written
+4,000,000 edges written
+5,000,000 edges written
+6,000,000 edges written
+7,000,000 edges written
+8,000,000 edges written
+9,000,000 edges written
+10,000,000 edges written
+11,000,000 edges written
+12,000,000 edges written
+13,000,000 edges written
+14,000,000 edges written
+15,000,000 edges written
+16,000,000 edges written
+17,000,000 edges written
+18,000,000 edges written
+19,000,000 edges written
+20,000,000 edges written
+21,000,000 edges written
+22,000,000 edges written
+23,000,000 edges written
+24,000,000 edges written
+25,000,000 edges written
+26,000,000 edges written
+27,000,000 edges written
+28,000,000 edges written
+29,000,000 edges written
+30,000,000 edges written
+  Relation types retained for training graph: 61
+  Training edges written to edges.bin: 30,807,215
+  Raw node->node subclass edges collected: 4,485,419
+  Raw subclass edges skipped (publication endpoint): 356,113
+Step 4/5: Build subclass hierarchy graph
+  Synthetic category nodes added to entities.txt: 64
+  Total entities after category expansion: 5,864,087
+  Node->node subclass edges before SCC pruning: 4,485,419
+  Node->node subclass edges removed in SCC pruning: 11,200
+  Node->node subclass edges after SCC pruning: 2,428,912
+  Node->node subclass graph DAG check: True
+  Publication node->biolink:Publication edges added: 29,736
+  Synthetic node->category edges added: 5,864,045
+  Synthetic category->category edges added: 91
+  Augmented subclass edges removed in SCC pruning: 50
+  Augmented subclass edges removed in transitive reduction: 1,787,518
+  Final subclass edges written to subclass_edge_list.txt: 6,505,480
+  Final subclass graph DAG check: True
+  Orphan entities after final subclass DAG (no incident subclass edge): 7
+Step 5/5: Write relation mappings and relation hierarchy
+  Ancestor-only relations added: 9
+  Relation labels written to relations.txt: 70
+  Final relation hierarchy edges written: 68
+  Relation hierarchy edges removed in transitive reduction: 7
+=== Conversion Complete ===
+Outputs: /home/logansizemore/Documents/knowledge_graph_dd/data/processed/entities.txt, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/relations.txt, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/edges.bin, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/subclass_edge_list.txt, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/relation_hierarchy_edge_list.txt
+
+
 ### Subclass Of Relations:
 Total Entities: 5,864,272
 

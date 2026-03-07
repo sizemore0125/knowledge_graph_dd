@@ -34,6 +34,47 @@ def load_edges(path):
     return np.memmap(path, dtype=np.int32, mode="r").reshape(-1, 3)
 
 
+def test_accuracy(model, dataloader, device):
+    model.eval()
+    total = 0
+    correct = 0
+
+    with torch.no_grad():
+        for edges, labels in dataloader:
+            edges = edges.to(device)
+            labels = labels.to(device)
+
+            logits = model(edges).squeeze(1)
+            preds = (torch.sigmoid(logits) >= 0.5).to(labels.dtype)
+
+            correct += (preds == labels).sum().item()
+            total += labels.numel()
+
+    model.train()
+    return correct / total if total > 0 else 0.0
+
+
+def build_relation_swap_split(edges, relations_map):
+    relation_to_id = {name: idx for idx, name in enumerate(relations_map)}
+    treats_id = relation_to_id.get("treats")
+    contra_id = relation_to_id.get("contraindicated_in")
+
+    treats_idx = np.where(edges[:, 1] == treats_id)[0]
+    contra_idx = np.where(edges[:, 1] == contra_id)[0]
+
+    heldout_treats_idx = treats_idx[np.random.rand(len(treats_idx)) > 0.5]
+    heldout_contra_idx = contra_idx[np.random.rand(len(contra_idx)) > 0.5]
+
+    heldout_idx = np.concatenate([heldout_treats_idx, heldout_contra_idx], axis=0)
+    test_edges = np.asarray(edges[heldout_idx], dtype=np.int64)
+
+    train_mask = np.ones(len(edges), dtype=bool)
+    train_mask[heldout_idx] = False
+    train_edges = np.asarray(edges[train_mask], dtype=np.int32)
+
+    return train_edges, test_edges
+
+
 class PositiveDataset(torch.utils.data.Dataset):
     def __init__(self, edges, relation_hierarchy: ig.Graph):
         self.edges = edges
@@ -82,6 +123,36 @@ class NegativeDataset(torch.utils.data.Dataset):
         task_id = torch.tensor(0, dtype=torch.long)
 
         return edge, dummy_edge, label, task_id
+
+
+class RelationSwapTestDataset(torch.utils.data.Dataset):
+    def __init__(self, true_edges, relations_map):
+        relation_to_id = {name: idx for idx, name in enumerate(relations_map)}
+        treats_id = relation_to_id.get("treats")
+        contra_id = relation_to_id.get("contraindicated_in")
+
+        positive_edges = np.asarray(true_edges, dtype=np.int64)
+        negative_edges = positive_edges.copy()
+        is_treats = negative_edges[:, 1] == treats_id
+        negative_edges[is_treats, 1] = contra_id
+        negative_edges[~is_treats, 1] = treats_id
+
+        all_edges = np.concatenate([positive_edges, negative_edges], axis=0)
+        all_labels = np.concatenate(
+            [
+                np.ones(len(positive_edges), dtype=np.float32),
+                np.zeros(len(negative_edges), dtype=np.float32),
+            ]
+        )
+
+        self.edge_tensor = torch.tensor(all_edges, dtype=torch.long)
+        self.label_tensor = torch.tensor(all_labels, dtype=torch.float32)
+
+    def __len__(self):
+        return self.edge_tensor.shape[0]
+
+    def __getitem__(self, idx):
+        return self.edge_tensor[idx], self.label_tensor[idx]
 
 
 class DomainRangeDataset(torch.utils.data.Dataset):
@@ -407,9 +478,14 @@ def main(num_epochs=3):
     relation_hierarchy.vs["name"] = relations_map
 
     knowledge_graph_edges = load_edges(knowledge_graph_edges_path)
+    train_edges, test_edges = build_relation_swap_split(
+        edges=knowledge_graph_edges,
+        relations_map=relations_map,
+    )
+    relation_swap_test_dataset = RelationSwapTestDataset(test_edges, relations_map)
 
     pos_dataset = PositiveDataset(
-        edges=knowledge_graph_edges,
+        edges=train_edges,
         relation_hierarchy=relation_hierarchy,
     )
     neg_dataset = NegativeDataset(
@@ -418,7 +494,7 @@ def main(num_epochs=3):
         num_datapoints=len(pos_dataset),
     )
     domain_range_dataset = DomainRangeDataset(
-        edges=knowledge_graph_edges,
+        edges=train_edges,
         entity_hierarchy=entity_hierarchy,
         relation_hierarchy=relation_hierarchy,
         num_samples=len(pos_dataset),
@@ -429,6 +505,15 @@ def main(num_epochs=3):
         dataset=dataset,
         batch_size=512,
         shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+
+    test_dataloader = torch.utils.data.DataLoader(
+        dataset=relation_swap_test_dataset,
+        batch_size=1024,
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
@@ -499,6 +584,8 @@ def main(num_epochs=3):
                 )
 
             if step_idx % 5000 == 0:
+                acc = test_accuracy(model, test_dataloader, device)
+                print(f"test_accuracy={acc:.4f}")
                 checkpoint_path = os.path.join(checkpoint_dir, f"model.pt")
                 torch.save(model.state_dict(), checkpoint_path)
 

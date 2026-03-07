@@ -389,6 +389,22 @@ def write_relation_hierarchy_edge_list(relation2id, toolkit):
     return len(reduced_hierarchy_edges), removed_transitive_edges
 
 
+def add_relation_ancestors(relation2id, toolkit):
+    added = 0
+    relation_names = list(relation2id.keys())
+
+    for relation_name in relation_names:
+        ancestors = toolkit.get_ancestors(relation_name, formatted=True) or [relation_name]
+        for ancestor_name in ancestors:
+            if ancestor_name in SKIP_RELATIONS or ancestor_name == EXACT_MATCH_RELATION:
+                continue
+            if ancestor_name not in relation2id:
+                relation2id[ancestor_name] = len(relation2id)
+                added += 1
+
+    return added
+
+
 def write_mapping(mapping, path):
     with open(path, "w") as f:
         for key, idx in sorted(mapping.items(), key=lambda item: item[1]):
@@ -455,8 +471,10 @@ def main():
     print(f"  Orphan entities after final subclass DAG (no incident subclass edge): {subclass_stats['orphan_nodes']:,}")
 
     print("Step 5/5: Write relation mappings and relation hierarchy")
+    ancestors_added = add_relation_ancestors(relation2id, toolkit)
     write_mapping(relation2id, RELATIONS_PATH)
     hierarchy_edge_count, hierarchy_reduction_count = write_relation_hierarchy_edge_list(relation2id, toolkit)
+    print(f"  Ancestor-only relations added: {ancestors_added:,}")
     print(f"  Relation labels written to relations.txt: {len(relation2id):,}")
     print(f"  Final relation hierarchy edges written: {hierarchy_edge_count:,}")
     print(f"  Relation hierarchy edges removed in transitive reduction: {hierarchy_reduction_count:,}")
