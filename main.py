@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 from kgdd.rule_penalties import RulePenalties
 
-DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/processed/"
+DATA_DIR = "/nfs/stak/users/sizemolo/kgdd/data/"
 
 
 def load_data(path):
@@ -379,7 +379,7 @@ class Model(torch.nn.Module):
         n_relations,
         entity_hierarchy,
         relation_hierarchy,
-        emb_dim=8,
+        emb_dim=32,
     ):
         super().__init__()
         self.entity_codebook = HierarchicalEmbedding(n_entities, emb_dim, entity_hierarchy)
@@ -408,7 +408,7 @@ class Model(torch.nn.Module):
         return y_pred
 
 
-def main(num_epochs=3):
+def main(num_epochs=10):
     entities_path = DATA_DIR + "entities.txt"
     relations_path = DATA_DIR + "relations.txt"
 
@@ -418,7 +418,7 @@ def main(num_epochs=3):
     knowledge_graph_edges_path = DATA_DIR + "edges.bin"
     negative_edges_path = DATA_DIR + "negative_edges.bin"
 
-    checkpoint_dir = "/home/logansizemore/Documents/knowledge_graph_dd/checkpoints"
+    checkpoint_dir = "/nfs/stak/users/sizemolo/kgdd/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
