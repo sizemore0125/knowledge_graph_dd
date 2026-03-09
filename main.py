@@ -9,6 +9,7 @@ from tqdm import tqdm
 from kgdd.rule_penalties import RulePenalties
 
 DATA_DIR = "/nfs/stak/users/sizemolo/kgdd/data/"
+CHECKPOINT_DIR = "/nfs/stak/users/sizemolo/kgdd/checkpoints"
 
 
 def load_data(path):
@@ -52,6 +53,48 @@ def test_accuracy(model, dataloader, device):
 
     model.train()
     return correct / total if total > 0 else 0.0
+
+
+def edge_keys(edges, num_entities, num_relations):
+    heads = edges[:, 0].astype(np.uint64, copy=False)
+    rels = edges[:, 1].astype(np.uint64, copy=False)
+    tails = edges[:, 2].astype(np.uint64, copy=False)
+    return heads + np.uint64(num_entities) * (rels + np.uint64(num_relations) * tails)
+
+
+def build_relation_swap_split(pos_edges, neg_edges, relations_map, num_entities, num_relations):
+    relation_to_id = {name: idx for idx, name in enumerate(relations_map)}
+    treats_id = relation_to_id.get("treats")
+    contra_id = relation_to_id.get("contraindicated_in")
+    if treats_id is None or contra_id is None:
+        raise ValueError("relations.txt must include both 'treats' and 'contraindicated_in'.")
+
+    treats_idx = np.where(pos_edges[:, 1] == treats_id)[0]
+    contra_idx = np.where(pos_edges[:, 1] == contra_id)[0]
+
+    heldout_treats_idx = treats_idx[np.random.rand(len(treats_idx)) > 0.5]
+    heldout_contra_idx = contra_idx[np.random.rand(len(contra_idx)) > 0.5]
+
+    heldout_idx = np.concatenate([heldout_treats_idx, heldout_contra_idx], axis=0)
+    test_edges = np.asarray(pos_edges[heldout_idx], dtype=np.int64)
+
+    train_pos_mask = np.ones(len(pos_edges), dtype=bool)
+    train_pos_mask[heldout_idx] = False
+    train_pos_edges = np.asarray(pos_edges[train_pos_mask], dtype=np.int32)
+
+    keep_neg_mask = np.ones(len(neg_edges), dtype=bool)
+
+    relevant_neg_idx = np.where((neg_edges[:, 1] == treats_id) | (neg_edges[:, 1] == contra_id))[0]
+    if len(relevant_neg_idx) > 0 and len(test_edges) > 0:
+        relevant_neg_edges = np.asarray(neg_edges[relevant_neg_idx], dtype=np.int64)
+        relevant_neg_keys = edge_keys(relevant_neg_edges, num_entities=num_entities, num_relations=num_relations)
+        test_keys = edge_keys(test_edges, num_entities=num_entities, num_relations=num_relations)
+        overlap_mask = np.isin(relevant_neg_keys, test_keys)
+        keep_neg_mask[relevant_neg_idx[overlap_mask]] = False
+
+    train_neg_edges = np.asarray(neg_edges[keep_neg_mask], dtype=np.int32)
+
+    return train_pos_edges, train_neg_edges, test_edges
 
 
 class PositiveDataset(torch.utils.data.Dataset):
@@ -126,7 +169,9 @@ class RelationSwapTestDataset(torch.utils.data.Dataset):
         return self.edge_tensor.shape[0]
 
     def __getitem__(self, idx):
-        return self.edge_tensor[idx], self.label_tensor[idx]
+        dummy_edge = torch.tensor([-1, -1, -1], dtype=torch.long)
+        task_id = torch.tensor(0, dtype=torch.long)
+        return self.edge_tensor[idx], dummy_edge, self.label_tensor[idx], task_id
 
 
 class DomainRangeDataset(torch.utils.data.Dataset):
@@ -418,8 +463,7 @@ def main(num_epochs=10):
     knowledge_graph_edges_path = DATA_DIR + "edges.bin"
     negative_edges_path = DATA_DIR + "negative_edges.bin"
 
-    checkpoint_dir = "/nfs/stak/users/sizemolo/kgdd/checkpoints"
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_workers = min(1, os.cpu_count() or 1)
@@ -441,18 +485,25 @@ def main(num_epochs=10):
 
     positive_edges = load_edges(knowledge_graph_edges_path)
     negative_edges = load_edges(negative_edges_path)
+    train_positive_edges, train_negative_edges, relation_swap_test_edges = build_relation_swap_split(
+        pos_edges=positive_edges,
+        neg_edges=negative_edges,
+        relations_map=relations_map,
+        num_entities=num_entities,
+        num_relations=num_relations,
+    )
 
     pos_dataset = PositiveDataset(
-        edges=positive_edges,
+        edges=train_positive_edges,
         relation_hierarchy=relation_hierarchy,
     )
-    neg_dataset = NegativeDataset(edges=negative_edges)
+    neg_dataset = NegativeDataset(edges=train_negative_edges)
 
     train_pos_dataset, test_pos_dataset = torch.utils.data.random_split(pos_dataset, [len(pos_dataset) - 50000, 50000])
     train_neg_dataset, test_neg_dataset = torch.utils.data.random_split(neg_dataset, [len(neg_dataset) - 50000, 50000])
 
     train_pos_indices = np.asarray(train_pos_dataset.indices, dtype=np.int64)
-    train_pos_edges = np.asarray(positive_edges[train_pos_indices], dtype=np.int32)
+    train_pos_edges = np.asarray(train_positive_edges[train_pos_indices], dtype=np.int32)
 
     domain_range_dataset = DomainRangeDataset(
         edges=train_pos_edges,
@@ -462,6 +513,10 @@ def main(num_epochs=10):
     )
     dataset = torch.utils.data.ConcatDataset([train_pos_dataset, train_neg_dataset, domain_range_dataset])
     test_dataset = torch.utils.data.ConcatDataset([test_pos_dataset, test_neg_dataset])
+    relation_swap_test_dataset = RelationSwapTestDataset(
+        true_edges=relation_swap_test_edges,
+        relations_map=relations_map,
+    )
 
     train_dataloader = torch.utils.data.DataLoader(
         dataset=dataset,
@@ -474,6 +529,13 @@ def main(num_epochs=10):
 
     test_dataloader = torch.utils.data.DataLoader(
         dataset=test_dataset,
+        batch_size=1024,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+    )
+    relation_swap_test_dataloader = torch.utils.data.DataLoader(
+        dataset=relation_swap_test_dataset,
         batch_size=1024,
         shuffle=False,
         num_workers=0,
@@ -493,14 +555,17 @@ def main(num_epochs=10):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
+    last_eval_prefix = ""
+
     for epoch_idx in range(num_epochs):
+        epoch_desc = f"{last_eval_prefix}Epoch {epoch_idx + 1}/{num_epochs}".strip()
         for step_idx, (edges, aux_edges, labels, task_ids) in enumerate(
             pbar := tqdm(
                 train_dataloader,
                 total=len(train_dataloader),
                 miniters=50,
                 mininterval=1,
-                desc=f"Epoch {epoch_idx + 1}/{num_epochs}",
+                desc=epoch_desc,
             )
         ):
             edges = edges.to(device, non_blocking=pin_memory)
@@ -547,12 +612,11 @@ def main(num_epochs=10):
                 )
 
             if (step_idx) % 5000 == 0:
-                checkpoint_path = os.path.join(checkpoint_dir, "model.pt")
-                try:
-                    acc = test_accuracy(model, test_dataloader, device)
-                    print(f"test_accuracy={acc:.4f}")
-                except Exception as exc:
-                    print(f"test_accuracy_failed={exc}")
+                checkpoint_path = os.path.join(CHECKPOINT_DIR, "model.pt")
+                acc = test_accuracy(model, test_dataloader, device)
+                relation_swap_acc = test_accuracy(model, relation_swap_test_dataloader, device)
+                last_eval_prefix = f"[test={acc:.4f} swap={relation_swap_acc:.4f}] "
+                pbar.set_description(f"{last_eval_prefix}Epoch {epoch_idx + 1}/{num_epochs}")
                 torch.save(model.state_dict(), checkpoint_path)
 
 
