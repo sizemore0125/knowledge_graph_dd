@@ -54,27 +54,6 @@ def test_accuracy(model, dataloader, device):
     return correct / total if total > 0 else 0.0
 
 
-def build_relation_swap_split(edges, relations_map):
-    relation_to_id = {name: idx for idx, name in enumerate(relations_map)}
-    treats_id = relation_to_id.get("treats")
-    contra_id = relation_to_id.get("contraindicated_in")
-
-    treats_idx = np.where(edges[:, 1] == treats_id)[0]
-    contra_idx = np.where(edges[:, 1] == contra_id)[0]
-
-    heldout_treats_idx = treats_idx[np.random.rand(len(treats_idx)) > 0.5]
-    heldout_contra_idx = contra_idx[np.random.rand(len(contra_idx)) > 0.5]
-
-    heldout_idx = np.concatenate([heldout_treats_idx, heldout_contra_idx], axis=0)
-    test_edges = np.asarray(edges[heldout_idx], dtype=np.int64)
-
-    train_mask = np.ones(len(edges), dtype=bool)
-    train_mask[heldout_idx] = False
-    train_edges = np.asarray(edges[train_mask], dtype=np.int32)
-
-    return train_edges, test_edges
-
-
 class PositiveDataset(torch.utils.data.Dataset):
     def __init__(self, edges, relation_hierarchy: ig.Graph):
         self.edges = edges
@@ -103,20 +82,15 @@ class PositiveDataset(torch.utils.data.Dataset):
 
 
 class NegativeDataset(torch.utils.data.Dataset):
-    def __init__(self, num_relations, num_entities, num_datapoints):
-        self.num_relations = num_relations
-        self.num_entities = num_entities
-
-        self.num_datapoints = num_datapoints
+    def __init__(self, edges):
+        self.edges = edges
 
     def __len__(self):
-        return self.num_datapoints
+        return self.edges.shape[0]
 
     def __getitem__(self, idx):
-        entity1 = torch.randint(0, self.num_entities, ()).item()
-        relation = torch.randint(0, self.num_relations, ()).item()
-        entity2 = torch.randint(0, self.num_entities, ()).item()
-        edge = torch.tensor([entity1, relation, entity2], dtype=torch.long)
+        edge_np = np.asarray(self.edges[idx], dtype=np.int64)
+        edge = torch.tensor(edge_np, dtype=torch.long)
 
         dummy_edge = torch.tensor([-1, -1, -1], dtype=torch.long)
         label = torch.tensor(0.0, dtype=torch.float32)
@@ -442,6 +416,7 @@ def main(num_epochs=3):
     relations_hierarchy_edge_list_path = DATA_DIR + "relation_hierarchy_edge_list.txt"
 
     knowledge_graph_edges_path = DATA_DIR + "edges.bin"
+    negative_edges_path = DATA_DIR + "negative_edges.bin"
 
     checkpoint_dir = "/home/logansizemore/Documents/knowledge_graph_dd/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -464,39 +439,29 @@ def main(num_epochs=3):
     relation_hierarchy = ig.Graph(n=num_relations, edges=relation_hierarchy_edges, directed=True)
     relation_hierarchy.vs["name"] = relations_map
 
-    knowledge_graph_edges = load_edges(knowledge_graph_edges_path)
-    train_edges, _ = build_relation_swap_split(
-        edges=knowledge_graph_edges,
-        relations_map=relations_map,
-    )
+    positive_edges = load_edges(knowledge_graph_edges_path)
+    negative_edges = load_edges(negative_edges_path)
 
     pos_dataset = PositiveDataset(
-        edges=train_edges,
+        edges=positive_edges,
         relation_hierarchy=relation_hierarchy,
     )
+    neg_dataset = NegativeDataset(edges=negative_edges)
+
     train_pos_dataset, test_pos_dataset = torch.utils.data.random_split(pos_dataset, [len(pos_dataset) - 50000, 50000])
+    train_neg_dataset, test_neg_dataset = torch.utils.data.random_split(neg_dataset, [len(neg_dataset) - 50000, 50000])
 
     train_pos_indices = np.asarray(train_pos_dataset.indices, dtype=np.int64)
-    train_pos_edges = np.asarray(train_edges[train_pos_indices], dtype=np.int32)
+    train_pos_edges = np.asarray(positive_edges[train_pos_indices], dtype=np.int32)
 
-    neg_dataset = NegativeDataset(
-        num_relations=num_relations,
-        num_entities=num_entities,
-        num_datapoints=len(train_pos_dataset),
-    )
-    neg_test_dataset = NegativeDataset(
-        num_relations=num_relations,
-        num_entities=num_entities,
-        num_datapoints=len(test_pos_dataset),
-    )
     domain_range_dataset = DomainRangeDataset(
         edges=train_pos_edges,
         entity_hierarchy=entity_hierarchy,
         relation_hierarchy=relation_hierarchy,
         num_samples=len(train_pos_dataset),
     )
-    dataset = torch.utils.data.ConcatDataset([train_pos_dataset, neg_dataset, domain_range_dataset])
-    test_dataset = torch.utils.data.ConcatDataset([test_pos_dataset, neg_test_dataset])
+    dataset = torch.utils.data.ConcatDataset([train_pos_dataset, train_neg_dataset, domain_range_dataset])
+    test_dataset = torch.utils.data.ConcatDataset([test_pos_dataset, test_neg_dataset])
 
     train_dataloader = torch.utils.data.DataLoader(
         dataset=dataset,
@@ -521,7 +486,9 @@ def main(num_epochs=3):
         entity_hierarchy=entity_hierarchy,
         relation_hierarchy=relation_hierarchy,
     ).to(device)
+
     model.train()
+
     rule_penalties = RulePenalties(model)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)

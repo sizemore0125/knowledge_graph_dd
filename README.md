@@ -73,6 +73,11 @@ Step 5/5: Write relation mappings and relation hierarchy
 === Conversion Complete ===
 Outputs: /home/logansizemore/Documents/knowledge_graph_dd/data/processed/entities.txt, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/relations.txt, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/edges.bin, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/subclass_edge_list.txt, /home/logansizemore/Documents/knowledge_graph_dd/data/processed/relation_hierarchy_edge_list.txt
 
+## Negative Dataset Structure
+Rule 1 count: 1,149,389
+Rule 2 count: 19,160,402
+Rule 3 count: 9,537,340
+Rule 4 count: 960,084
 
 ### Subclass Of Relations:
 Total Entities: 5,864,272
