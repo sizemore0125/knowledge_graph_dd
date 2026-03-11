@@ -2,7 +2,7 @@ import json
 import struct
 from pathlib import Path
 
-DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/"
+DATA_DIR = "./data/"
 NODES_FILE = DATA_DIR + "kg2.10.3-conflated-nodes.jsonl"
 EDGES_FILE = DATA_DIR + "kg2.10.3-conflated-edges.jsonl"
 
