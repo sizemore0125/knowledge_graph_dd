@@ -1,5 +1,5 @@
 # Knowledge Graphs for Drug Discovery
-
+hyperbolic distance. 
 ## Relation Types:
 ```
 'subclass_of', 'related_to', 'has_member', 'has_part', 'coexists_with', 'manifestation_of', 'has_phenotype', 'located_in', 'affects', 'in_taxon', 'biomarker_for', 'has_input', 'gene_associated_with_condition', 'has_participant', 'gene_product_of', 'causes', 'derives_from', 'associated_with', 'capable_of', 'regulates', 'produces', 'physically_interacts_with', 'expressed_in', 'correlated_with', 'chemically_similar_to', 'has_metabolite', 'develops_from', 'occurs_in', 'has_output', 'drug_regulatory_status_world_wide', 'precedes', 'actively_involved_in', 'is_sequence_variant_of', 'has_molecular_consequence', 'lacks_part', 'has_plasma_membrane_part', 'has_increased_amount', 'overlaps', 'has_decreased_amount', 'has_not_completed', 'temporally_related_to', 'directly_physically_interacts_with', 'composed_primarily_of', 'homologous_to', 'indirectly_physically_interacts_with', 'disrupts', 'contributes_to', 'exact_match', 'treats', 'disease_has_location', 'disease_has_basis_in', 'broad_match', 'treats_or_applied_or_studied_to_treat', 'interacts_with', 'predisposes_to_condition', 'preventative_for_condition', 'exacerbates_condition', 'diagnoses', 'colocalizes_with', 'enables', 'contraindicated_in', 'applied_to_treat', 'in_clinical_trials_for'

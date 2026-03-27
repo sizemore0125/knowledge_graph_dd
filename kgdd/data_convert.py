@@ -4,6 +4,7 @@ from pathlib import Path
 
 import bmt
 import igraph as ig
+from bmt.utils import format_element
 
 DATA_DIR = "/home/logansizemore/Documents/knowledge_graph_dd/data/"
 NODES_FILE = DATA_DIR + "kg2.10.3-conflated-nodes.jsonl"
@@ -288,7 +289,7 @@ def build_and_write_subclass_graph(
     def register_category(category):
         if category in category_ancestors:
             return
-        ancestors = toolkit.get_ancestors(category, formatted=True) or [category]
+        ancestors = get_entity_category_ancestor_chain(category, toolkit)
         category_ancestors[category] = tuple(ancestors)
         all_category_labels.update(ancestors)
 
@@ -368,15 +369,69 @@ def build_and_write_subclass_graph(
     }
 
 
-def write_relation_hierarchy_edge_list(relation2id, toolkit):
+def should_skip_relation(relation_name):
+    return relation_name in SKIP_RELATIONS or relation_name == EXACT_MATCH_RELATION
+
+
+def get_direct_relation_supers(relation_name, toolkit):
+    element = toolkit.get_element(relation_name)
+    if element is None:
+        return []
+
+    supers = []
+    parent_name = getattr(element, "is_a", None)
+    if parent_name:
+        supers.append(format_element(parent_name))
+
+    for mixin_name in getattr(element, "mixins", ()) or ():
+        supers.append(format_element(mixin_name))
+
+    seen = set()
+    ordered_supers = []
+    for super_name in supers:
+        if super_name == relation_name or super_name in seen:
+            continue
+        seen.add(super_name)
+        ordered_supers.append(super_name)
+
+    return ordered_supers
+
+
+def collect_relation_graph(seed_relations, toolkit):
+    direct_supers_by_relation = {}
+    ordered_relations = []
+    seen_relations = set()
+    stack = list(reversed(seed_relations))
+
+    while stack:
+        relation_name = stack.pop()
+        if relation_name in seen_relations or should_skip_relation(relation_name):
+            continue
+
+        seen_relations.add(relation_name)
+        ordered_relations.append(relation_name)
+
+        direct_supers = [
+            super_name
+            for super_name in get_direct_relation_supers(relation_name, toolkit)
+            if not should_skip_relation(super_name)
+        ]
+        direct_supers_by_relation[relation_name] = direct_supers
+
+        for super_name in reversed(direct_supers):
+            if super_name not in seen_relations:
+                stack.append(super_name)
+
+    return ordered_relations, direct_supers_by_relation
+
+
+def write_relation_hierarchy_edge_list(relation2id, direct_supers_by_relation):
     hierarchy_edges = set()
 
-    for relation_name in relation2id:
-        ancestors = toolkit.get_ancestors(relation_name, formatted=True) or [relation_name]
-        for child_name, parent_name in zip(ancestors, ancestors[1:]):
-            child_id = relation2id.get(child_name)
+    for relation_name, child_id in relation2id.items():
+        for parent_name in direct_supers_by_relation.get(relation_name, ()):
             parent_id = relation2id.get(parent_name)
-            if child_id is None or parent_id is None or child_id == parent_id:
+            if parent_id is None or child_id == parent_id:
                 continue
             hierarchy_edges.add((child_id, parent_id))
 
@@ -389,20 +444,20 @@ def write_relation_hierarchy_edge_list(relation2id, toolkit):
     return len(reduced_hierarchy_edges), removed_transitive_edges
 
 
-def add_relation_ancestors(relation2id, toolkit):
-    added = 0
-    relation_names = list(relation2id.keys())
+def get_entity_category_ancestor_chain(category_name, toolkit):
+    chain = [category_name]
+    seen = {category_name}
+    current = category_name
 
-    for relation_name in relation_names:
-        ancestors = toolkit.get_ancestors(relation_name, formatted=True) or [relation_name]
-        for ancestor_name in ancestors:
-            if ancestor_name in SKIP_RELATIONS or ancestor_name == EXACT_MATCH_RELATION:
-                continue
-            if ancestor_name not in relation2id:
-                relation2id[ancestor_name] = len(relation2id)
-                added += 1
+    while True:
+        parent_name = toolkit.get_parent(current, formatted=True)
+        if parent_name is None or parent_name in seen:
+            break
+        chain.append(parent_name)
+        seen.add(parent_name)
+        current = parent_name
 
-    return added
+    return chain
 
 
 def write_mapping(mapping, path):
@@ -471,9 +526,18 @@ def main():
     print(f"  Orphan entities after final subclass DAG (no incident subclass edge): {subclass_stats['orphan_nodes']:,}")
 
     print("Step 5/5: Write relation mappings and relation hierarchy")
-    ancestors_added = add_relation_ancestors(relation2id, toolkit)
+    source_relations = [
+        relation_name
+        for relation_name, _ in sorted(relation2id.items(), key=lambda item: item[1])
+    ]
+    relations, direct_supers_by_relation = collect_relation_graph(source_relations, toolkit)
+    ancestors_added = len(relations) - len(source_relations)
+    relation2id = {relation_name: idx for idx, relation_name in enumerate(relations)}
     write_mapping(relation2id, RELATIONS_PATH)
-    hierarchy_edge_count, hierarchy_reduction_count = write_relation_hierarchy_edge_list(relation2id, toolkit)
+    hierarchy_edge_count, hierarchy_reduction_count = write_relation_hierarchy_edge_list(
+        relation2id,
+        direct_supers_by_relation,
+    )
     print(f"  Ancestor-only relations added: {ancestors_added:,}")
     print(f"  Relation labels written to relations.txt: {len(relation2id):,}")
     print(f"  Final relation hierarchy edges written: {hierarchy_edge_count:,}")
