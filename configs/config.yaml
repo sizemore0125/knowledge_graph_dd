@@ -1,0 +1,5 @@
+profiles:
+  cluster: "subconfigs/cluster.yaml"
+  ~debug: "subconfigs/debug.yaml"
+
+epochs: 10

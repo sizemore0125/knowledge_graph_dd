@@ -1,0 +1,2 @@
+data_dir: "/nfs/stak/users/sizemolo/kgdd/data/"
+checkpoint_dir: "/nfs/stak/users/sizemolo/kgdd/checkpoints"

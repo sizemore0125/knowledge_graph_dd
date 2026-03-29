@@ -1,0 +1,2 @@
+data_dir: "/home/logansizemore/Documents/knowledge_graph_dd/data/debug_dataset/"
+checkpoint_dir: "/home/logansizemore/Documents/knowledge_graph_dd/data/checkpoints"

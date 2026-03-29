@@ -1114,6 +1114,7 @@ dependencies = [
     { name = "plotly" },
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "skeletonkey" },
     { name = "torch" },
     { name = "tqdm" },
 ]
@@ -1129,6 +1130,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "plotly", specifier = ">=6.6.0" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
+    { name = "skeletonkey", specifier = ">=0.3.3.0" },
     { name = "torch", specifier = ">=2.10.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]
@@ -2660,6 +2662,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "skeletonkey"
+version = "0.3.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/91/22/8f0b2530051c9d1dfd85e05ce350e5ce4d1119b2c6024af337d40a06204a/skeletonkey-0.3.3.0.tar.gz", hash = "sha256:6cf574361d3d2cf9b7136913a0d5c4bb3cbd941525d4f08e8578a6066c6425c7", size = 17286, upload-time = "2026-03-23T15:54:21.53Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/35/f9/fdf2e62555586aa354215a4503692ba957afb9520353bed64e01d10747a4/skeletonkey-0.3.3.0-py3-none-any.whl", hash = "sha256:4dd15c5df6287b36d11b8dd5adbd23130263cf79d0dbfe2b9142c406c596c740", size = 15720, upload-time = "2026-03-23T15:54:20.292Z" },
 ]
 
 [[package]]
