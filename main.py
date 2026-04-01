@@ -8,6 +8,7 @@ import skeletonkey as sk
 
 from kgdd.data import build_relation_swap_split, load_data, load_edges, load_hierarchy
 from kgdd.dataset import DomainRangeDataset, NegativeDataset, PositiveDataset, RelationSwapTestDataset
+from kgdd.disk_loss import DiskLoss
 from kgdd.model import Model
 from kgdd.rule_penalties import RulePenalties
 from kgdd.training import test_accuracy
@@ -123,6 +124,7 @@ def main(args):
     model.train()
 
     rule_penalties = RulePenalties(model)
+    disk_loss = DiskLoss(model.entity_codebook, entity_hierarchy).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -152,10 +154,16 @@ def main(args):
                 pos_scores = logits[kg_pos_mask]
                 general_edges = aux_edges[kg_pos_mask]
                 general_scores = model(general_edges)
+                pos_edges = edges[kg_pos_mask]
+                breakpoint()
+                entity_ids = torch.cat([pos_edges[:, 0], pos_edges[:, 2]], dim=0)
+                negative_ids = entity_ids[torch.randperm(entity_ids.shape[0], device=device)]
 
                 hierarchy_penalty = torch.nn.functional.relu(pos_scores - general_scores).squeeze(1).mean()
+                disk_penalty = disk_loss(entity_ids, negative_ids)
             else:
                 hierarchy_penalty = torch.tensor(0.0, device=device)
+                disk_penalty = torch.tensor(0.0, device=device)
 
             domain_range_mask = task_ids == 1
             if domain_range_mask.any():
@@ -167,7 +175,7 @@ def main(args):
             else:
                 rule_penalty = torch.tensor(0.0, device=device)
 
-            loss = base_loss + 0.25 * hierarchy_penalty + 0.25 * rule_penalty
+            loss = base_loss + 0.25 * hierarchy_penalty + 0.25 * rule_penalty + 0.25 * disk_penalty
 
             optimizer.zero_grad()
             loss.backward()
@@ -177,6 +185,7 @@ def main(args):
                 pbar.set_postfix(
                     loss=f"{loss.item():.4f}",
                     rel_hier=f"{hierarchy_penalty.item():.4f}",
+                    disk=f"{disk_penalty.item():.4f}",
                     rule=f"{rule_penalty.item():.4f}",
                     refresh=False,
                 )

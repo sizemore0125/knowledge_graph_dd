@@ -1,6 +1,6 @@
 import torch
 
-from kgdd.model.hierarchical_embedding import HierarchicalEmbedding
+from kgdd.model.hierarchical_embedding import DiskEmbeddings, HierarchicalEmbedding
 
 
 class Model(torch.nn.Module):
@@ -13,7 +13,7 @@ class Model(torch.nn.Module):
         emb_dim=32,
     ):
         super().__init__()
-        self.entity_codebook = HierarchicalEmbedding(n_entities, emb_dim, entity_hierarchy)
+        self.entity_codebook = DiskEmbeddings(n_entities, emb_dim)
         self.relation_codebook = HierarchicalEmbedding(n_relations, emb_dim, relation_hierarchy)
         self.emb_dim = emb_dim
 
@@ -22,7 +22,7 @@ class Model(torch.nn.Module):
 
     def forward(self, edge):
         entity_ids = torch.cat([edge[:, 0], edge[:, 2]], dim=0)
-        entity_embeddings = self.entity_codebook(entity_ids)
+        entity_embeddings, _ = self.entity_codebook(entity_ids)
         split_idx = edge.shape[0]
 
         entity1 = entity_embeddings[:split_idx]

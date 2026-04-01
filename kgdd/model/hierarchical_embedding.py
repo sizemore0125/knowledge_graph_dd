@@ -91,3 +91,31 @@ class HierarchicalEmbedding(torch.nn.Module):
             *node_ids.shape,
             self.residual.embedding_dim,
         )
+
+
+class DiskEmbeddings(torch.nn.Module):
+    def __init__(self, num_nodes: int, dim: int):
+        super().__init__()
+
+        self.num_nodes = num_nodes
+        self.dim = dim
+
+        self.centers = torch.nn.Embedding(num_nodes, dim)
+        self.radii = torch.nn.Embedding(num_nodes, 1)
+
+    def forward(self, node_ids: torch.LongTensor):
+        centers = self.centers(node_ids)
+        radii = self.radii(node_ids).squeeze(-1)
+        return centers, radii
+
+    def score(
+        self,
+        parent_ids: torch.LongTensor,
+        child_ids: torch.LongTensor,
+    ) -> torch.Tensor:
+        c_p, r_p = self(parent_ids)
+        c_c, r_c = self(child_ids)
+
+        dist = torch.norm(c_p - c_c, dim=-1)
+
+        return dist - r_p + r_c
