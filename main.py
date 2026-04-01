@@ -155,7 +155,7 @@ def main(args):
                 general_edges = aux_edges[kg_pos_mask]
                 general_scores = model(general_edges)
                 pos_edges = edges[kg_pos_mask]
-                breakpoint()
+
                 entity_ids = torch.cat([pos_edges[:, 0], pos_edges[:, 2]], dim=0)
                 negative_ids = entity_ids[torch.randperm(entity_ids.shape[0], device=device)]
 

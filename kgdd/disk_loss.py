@@ -78,8 +78,6 @@ class DiskLoss(torch.nn.Module):
         pos_score = self.disk_embeddings.score(ancestor_ids, expanded_entity_ids)
         neg_score = self.disk_embeddings.score(ancestor_ids, expanded_negative_ids)
 
-        breakpoint()
-
         pair_loss = torch.relu(pos_score) + torch.relu(margin - neg_score)
 
         loss_by_example = torch.zeros(
