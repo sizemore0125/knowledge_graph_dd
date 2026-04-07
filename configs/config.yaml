@@ -3,3 +3,5 @@ profiles:
   ~debug: "subconfigs/debug.yaml"
 
 epochs: 10
+random_inverse_edges: false
+random_inverse_p: 0.5
