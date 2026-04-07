@@ -14,6 +14,62 @@ from kgdd.rule_penalties import RulePenalties
 from kgdd.training import test_binary_classification_metrics
 
 
+def build_neighbor_index(edges: np.ndarray, num_entities: int) -> list[np.ndarray | None]:
+    neighbors: list[list[tuple[int, int, int]]] = [[] for _ in range(num_entities)]
+    for head, rel, tail in edges:
+        head_id = int(head)
+        rel_id = int(rel)
+        tail_id = int(tail)
+        neighbors[head_id].append((tail_id, rel_id, 0))
+        neighbors[tail_id].append((head_id, rel_id, 1))
+    return [np.asarray(items, dtype=np.int64) if items else None for items in neighbors]
+
+
+def make_neighbor_sampler(neighbors: list[np.ndarray | None], k: int):
+    k = int(k)
+    if k <= 0:
+        raise ValueError("attention_neighbor_k must be positive.")
+
+    def sample(entity_ids: np.ndarray, deterministic: bool):
+        batch_size = entity_ids.shape[0]
+        nbr = np.empty((batch_size, k), dtype=np.int64)
+        rel = np.empty((batch_size, k), dtype=np.int64)
+        direction = np.empty((batch_size, k), dtype=np.int64)
+        for i, entity_id in enumerate(entity_ids):
+            entries = neighbors[int(entity_id)]
+            if entries is None or len(entries) == 0:
+                nbr[i] = entity_id
+                rel[i] = 0
+                direction[i] = 0
+                continue
+            if deterministic:
+                idx = np.arange(k) % len(entries)
+            else:
+                idx = np.random.randint(0, len(entries), size=k)
+            selected = entries[idx]
+            nbr[i] = selected[:, 0]
+            rel[i] = selected[:, 1]
+            direction[i] = selected[:, 2]
+        return nbr, rel, direction
+
+    def sampler(edges: torch.Tensor, device: torch.device, deterministic: bool = False):
+        edge_np = edges.detach().cpu().numpy()
+        e1_ids = edge_np[:, 0]
+        e2_ids = edge_np[:, 2]
+        e1_nbr, e1_rel, e1_dir = sample(e1_ids, deterministic)
+        e2_nbr, e2_rel, e2_dir = sample(e2_ids, deterministic)
+        return {
+            "e1_neighbor_ids": torch.as_tensor(e1_nbr, device=device, dtype=torch.long),
+            "e1_relation_ids": torch.as_tensor(e1_rel, device=device, dtype=torch.long),
+            "e1_direction_ids": torch.as_tensor(e1_dir, device=device, dtype=torch.long),
+            "e2_neighbor_ids": torch.as_tensor(e2_nbr, device=device, dtype=torch.long),
+            "e2_relation_ids": torch.as_tensor(e2_rel, device=device, dtype=torch.long),
+            "e2_direction_ids": torch.as_tensor(e2_dir, device=device, dtype=torch.long),
+        }
+
+    return sampler
+
+
 @sk.unlock("configs/config.yaml")
 def main(args):
     entities_path = args.data_dir + "entities.txt"
@@ -77,6 +133,9 @@ def main(args):
     train_pos_indices = np.asarray(train_pos_dataset.indices, dtype=np.int64)
     train_pos_edges = np.asarray(train_positive_edges[train_pos_indices], dtype=np.int32)
 
+    neighbors = build_neighbor_index(train_pos_edges, num_entities)
+    neighbor_sampler = make_neighbor_sampler(neighbors, 2)
+
     domain_range_dataset = DomainRangeDataset(
         edges=train_pos_edges,
         entity_hierarchy=entity_hierarchy,
@@ -120,6 +179,9 @@ def main(args):
         entity_hierarchy=entity_hierarchy,
         relation_hierarchy=relation_hierarchy,
         random_inverse_edges=True,
+        use_attention=True,
+        attention_hidden_dim=32,
+        attention_num_heads=4,
     ).to(device)
 
     model.train()
@@ -148,14 +210,17 @@ def main(args):
                     labels = labels.to(device, non_blocking=pin_memory).unsqueeze(1)
                     task_ids = task_ids.to(device, non_blocking=pin_memory)
 
-                    logits = model(edges)
+                    neighbor_data = neighbor_sampler(edges, device=device, deterministic=False)
+                    logits = model(edges, **neighbor_data)
                     base_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
                     kg_pos_mask = (task_ids == 0) & (labels.squeeze(1) > 0.5)
                     if kg_pos_mask.any():
                         pos_scores = logits[kg_pos_mask]
                         general_edges = aux_edges[kg_pos_mask]
-                        general_scores = model(general_edges)
+
+                        general_neighbor_data = neighbor_sampler(general_edges, device=device, deterministic=False)
+                        general_scores = model(general_edges, **general_neighbor_data)
                         pos_edges = edges[kg_pos_mask]
 
                         entity_ids = torch.cat([pos_edges[:, 0], pos_edges[:, 2]], dim=0)
@@ -194,9 +259,9 @@ def main(args):
 
                     if step_idx % 5000 == 0:
                         checkpoint_path = os.path.join(args.checkpoint_dir, "model.pt")
-                        metrics = test_binary_classification_metrics(model, test_dataloader, device)
+                        metrics = test_binary_classification_metrics(model, test_dataloader, device, neighbor_sampler=neighbor_sampler)
                         relation_swap_metrics = test_binary_classification_metrics(
-                            model, relation_swap_test_dataloader, device
+                            model, relation_swap_test_dataloader, device, neighbor_sampler=neighbor_sampler
                         )
                         metrics_pbar.set_description_str(
                             f"test acc={metrics['accuracy']:.4f} p={metrics['precision']:.4f} r={metrics['recall']:.4f} f1={metrics['f1']:.4f} | "

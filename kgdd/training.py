@@ -1,11 +1,7 @@
 import torch
 
 
-def test_accuracy(model, dataloader, device):
-    metrics = test_binary_classification_metrics(model, dataloader, device)
-    return metrics["accuracy"]
-
-def test_binary_classification_metrics(model, dataloader, device, threshold=0.5):
+def test_binary_classification_metrics(model, dataloader, device, threshold=0.5, neighbor_sampler=None):
     model.eval()
     total = 0
     correct = 0
@@ -18,7 +14,11 @@ def test_binary_classification_metrics(model, dataloader, device, threshold=0.5)
             edges = edges.to(device)
             labels = labels.to(device)
 
-            logits = model(edges).reshape(-1)
+            if neighbor_sampler is not None:
+                neighbor_data = neighbor_sampler(edges, device=device, deterministic=True)
+                logits = model(edges, **neighbor_data).reshape(-1)
+            else:
+                logits = model(edges).reshape(-1)
             pred_pos = torch.sigmoid(logits) >= threshold
             label_pos = labels.reshape(-1) >= 0.5
 
